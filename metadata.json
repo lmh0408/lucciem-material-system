@@ -1,0 +1,6 @@
+{
+  "name": "스마트 통합 자재 관리 및 자동 발주 시스템",
+  "description": "옥외보관함, 실내보관함, 이동형보관함, 휴대용 케이스 4대 제품군 대상 공통 자재 통합 관리, 안전재고 모니터링 및 자동 발주 시스템",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
