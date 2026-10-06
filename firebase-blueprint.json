@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Lucciem Material Management Database Blueprint",
+  "description": "Schema definition for Lucciem inventory and materials management system",
+  "entities": {
+    "Material": {
+      "collection": "materials",
+      "description": "Raw materials and components inventory items",
+      "fields": {
+        "id": { "type": "number", "description": "Material unique sequential ID" },
+        "originalNo": { "type": "number", "description": "Original reference number from master BOM" },
+        "standardCode": { "type": "string", "description": "Normalized standard item code" },
+        "name": { "type": "string", "description": "Item name" },
+        "spec": { "type": "string", "description": "Standard specifications" },
+        "category": { "type": "string", "description": "Category code (EL, SW, CB, OP, ME, CA)" },
+        "categoryName": { "type": "string", "description": "Category display name in Korean" },
+        "unit": { "type": "string", "description": "Unit of measurement (EA, M, SET, etc.)" },
+        "unitPrice": { "type": "number", "description": "Unit price in KRW" },
+        "supplier": { "type": "string", "description": "Supplier / vendor name" },
+        "contactPerson": { "type": "string", "description": "Supplier contact person" },
+        "phone": { "type": "string", "description": "Supplier phone number" },
+        "notes": { "type": "string", "description": "Notes and remarks" },
+        "isCommon": { "type": "boolean", "description": "Whether used across multiple products" },
+        "commonLevel": { "type": "string", "description": "Commonality level (C4, C3, C2, DEDICATED)" },
+        "usedIn": { "type": "object", "description": "Usage quantity across product models (outdoor, indoor, mobile, lsend)" },
+        "currentStock": { "type": "number", "description": "Current on-hand stock quantity" },
+        "safetyStock": { "type": "number", "description": "Calculated safety stock requirement" },
+        "leadTimeDays": { "type": "number", "description": "Supplier lead time in days" },
+        "dailyUsage": { "type": "number", "description": "Average daily usage quantity" },
+        "reorderPoint": { "type": "number", "description": "Reorder point trigger quantity (ROP)" },
+        "moq": { "type": "number", "description": "Minimum order quantity" },
+        "eoq": { "type": "number", "description": "Economic order quantity" },
+        "status": { "type": "string", "description": "Stock health status" },
+        "updatedAt": { "type": "string", "description": "ISO timestamp of last update" }
+      }
+    },
+    "Supplier": {
+      "collection": "suppliers",
+      "description": "Supplier and vendor master contact details",
+      "fields": {
+        "id": { "type": "string", "description": "Supplier unique ID code" },
+        "name": { "type": "string", "description": "Supplier company name" },
+        "contactPerson": { "type": "string", "description": "Contact person name and title" },
+        "phone": { "type": "string", "description": "Phone number" },
+        "itemsCount": { "type": "number", "description": "Total items supplied" },
+        "category": { "type": "string", "description": "Primary material categories supplied" },
+        "reliability": { "type": "string", "description": "Reliability grade (A, B, C)" },
+        "leadTimeAvgDays": { "type": "number", "description": "Average lead time in days" },
+        "updatedAt": { "type": "string", "description": "ISO timestamp of last update" }
+      }
+    }
+  }
+}

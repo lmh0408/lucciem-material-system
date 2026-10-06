@@ -1,0 +1,76 @@
+@import "tailwindcss";
+
+@media print {
+  body {
+    background-color: #ffffff !important;
+    color: #0f172a !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  nav,
+  footer,
+  .print\:hidden {
+    display: none !important;
+  }
+
+  main {
+    max-width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  article {
+    max-width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  section {
+    break-inside: avoid;
+    page-break-inside: avoid;
+    box-shadow: none !important;
+    border-color: #cbd5e1 !important;
+    margin-bottom: 24px !important;
+  }
+
+  #purchase-order-document,
+  #purchase-order-document * {
+    visibility: visible;
+  }
+
+  #purchase-order-document {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  #purchase-order-document table {
+    width: 100% !important;
+    table-layout: fixed;
+  }
+
+  #purchase-order-document input,
+  #purchase-order-document textarea {
+    min-width: 0;
+    max-width: 100%;
+    resize: none !important;
+  }
+
+  #purchase-order-document textarea::-webkit-resizer {
+    display: none;
+  }
+
+  #purchase-order-document thead {
+    display: table-header-group;
+  }
+
+  #purchase-order-document tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  @page {
+    size: A4 portrait;
+    margin: 10mm;
+  }
+}

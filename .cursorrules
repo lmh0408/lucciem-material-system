@@ -1,0 +1,38 @@
+# 루시엠(Lucciem) 자재 관리 및 자동 발주 시스템 (Cursor AI Rules)
+
+## 1. 프로젝트 개요
+- 본 프로젝트는 무선 송출 장비 전문 기업 '루시엠(Lucciem)'의 4대 제품군(야외용, 실내용, 이동식, L-Send)에 대한 통합 자재(BOM) 관리 및 발주 자동화 시스템입니다.
+- 주요 기능:
+  - 품목 마스터 관리 (총 70개 분리 등록 품목, 규격별 고유 코드)
+  - 협력사(공급사)별 주문서 자동 생성 및 PDF 다운로드 (`jspdf` + `html2canvas`)
+  - 안전재고/ROP/EOQ 기반 자동 발주 시뮬레이터
+  - 공용 부품 호환 매트릭스 (4대 모델 교차 분석)
+  - Firebase Firestore 클라우드 실시간 동기화 + 로컬 오프라인 캐시 Fallback
+
+## 2. 기술 스택
+- **프레임워크**: React 19 (TypeScript) + Vite
+- **스타일링**: Tailwind CSS v4 (`@tailwindcss/vite`)
+- **아이콘**: `lucide-react`
+- **애니메이션**: `motion` (Framer Motion 최신 버전)
+- **문서 출력**: `jspdf`, `html2canvas`
+- **데이터베이스**: Firebase Firestore (Web SDK v12)
+
+## 3. 핵심 아키텍처 및 코딩 컨벤션
+- **상태 관리**:
+  - `src/App.tsx`에서 전체 자재 상태(`materials`)와 협력사 상태(`suppliers`)를 관리하며 각 하위 탭 컴포넌트에 props 및 콜백 전달.
+  - Firestore 연동 로직은 `src/lib/firebase.ts`에 캡슐화되어 있음.
+- **데이터 구조**:
+  - `src/types/inventory.ts`: `MaterialItem`, `SupplierInfo`, `ProductModel` 등 핵심 인터페이스 정의.
+  - `src/data/materialsData.ts`: 70개 품목 기본 마스터 데이터 (오프라인 fallback 및 초기 시딩용).
+- **컴포넌트 구조**:
+  - `src/components/MaterialManager.tsx`: 품목 목록, 필터, 검색, 신규 품목 등록/수정/삭제 모달
+  - `src/components/SupplierOrderManager.tsx`: 공급업체별 주문서 취합, 수량 조절, PDF 견적서 출력
+  - `src/components/AutoOrderSimulator.tsx`: ROP 기반 발주 필요 품목 자동 감지 및 시뮬레이션
+  - `src/components/CommonPartsMatrix.tsx`: 4대 기종 간 공용성 분석 매트릭스
+  - `src/components/Navbar.tsx`: 상단 내비게이션 및 DB 상태 배지
+
+## 4. Cursor 코드 작성 시 주의사항
+- Tailwind CSS v4를 사용하므로 별도의 `tailwind.config.js` 없이 CSS 클래스로 직접 스타일링합니다.
+- 품목 코드 규칙: `LU-[분류]-[연번]` (예: `LU-EL-001`, `LU-SW-001`, `LU-CB-001` 등).
+- 수량이나 가격 계산 시 `NaN` 또는 `undefined`가 발생하지 않도록 기본값(`0`) 처리를 철저히 합니다.
+- Firestore 저장 시 `undefined` 필드가 들어가지 않도록 `sanitizeForFirestore` 함수를 통과시킵니다.
