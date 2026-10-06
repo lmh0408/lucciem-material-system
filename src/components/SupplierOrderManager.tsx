@@ -15,6 +15,30 @@ import {
   X
 } from 'lucide-react';
 import { SUPPLIERS_LIST, RAW_MATERIALS_DATA } from '../data/materialsData';
+
+function supplierMatchKey(name: string): string {
+  const aliases: Record<string, string> = { aliexpress: '알리익스프레스' };
+  const key = name
+    .toLowerCase()
+    .replace(/주식회사/g, '')
+    .replace(/\(주\)|㈜/g, '')
+    .replace(/\([^)]*\)/g, '')
+    .replace(/[-–—]/g, '')
+    .replace(/\s+/g, '');
+  return aliases[key] ?? key;
+}
+
+function supplierMatchParts(name: string): string[] {
+  return name.split('/').map(supplierMatchKey).filter((part) => part.length > 0);
+}
+
+function materialBelongsToSupplier(materialSupplier: string, supplierName: string): boolean {
+  const supplierParts = supplierMatchParts(supplierName);
+  const materialParts = supplierMatchParts(materialSupplier);
+  return materialParts.some((part) => supplierParts.includes(part));
+}
+
+const OTHER_SUPPLIER_ID = 'OTHER';
 import { SupplierInfo, PurchaseOrderItem, MaterialItem } from '../types/inventory';
 import { DEFAULT_PURCHASE_ORDER_FORM, PurchaseOrderForm, downloadPurchaseOrderAsWord, purchaseOrderFileBase } from '../utils/wordExport';
 import { 
@@ -165,13 +189,29 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
     }
   };
 
+  const materialsForSupplier = (supplier: SupplierInfo) => {
+    if (supplier.id === OTHER_SUPPLIER_ID) {
+      return materials.filter((item) => !suppliers.some((registered) => materialBelongsToSupplier(item.supplier, registered.name)));
+    }
+    return materials.filter((item) => materialBelongsToSupplier(item.supplier, supplier.name));
+  };
+
+  const otherMaterials = materialsForSupplier({ id: OTHER_SUPPLIER_ID } as SupplierInfo);
+  const otherSourceNames = [...new Set(otherMaterials.map((item) => item.supplier))];
+  const otherSupplier: SupplierInfo = {
+    id: OTHER_SUPPLIER_ID,
+    name: '기타',
+    contactPerson: '등록 협력사 외 구매',
+    phone: '',
+    itemsCount: otherMaterials.length,
+    category: otherSourceNames.join(', '),
+    reliability: 'C',
+    leadTimeAvgDays: 7,
+  };
+
   // Generate PO for a selected supplier
   const handleGeneratePO = (supplier: SupplierInfo) => {
-    // Find all materials from this supplier that need order or all materials from this supplier
-    const supplierMaterials = materials.filter(m => 
-      m.supplier.toLowerCase().includes(supplier.name.toLowerCase().split('(')[0].trim()) ||
-      supplier.name.toLowerCase().includes(m.supplier.toLowerCase().split('(')[0].trim())
-    );
+    const supplierMaterials = materialsForSupplier(supplier);
 
     const poItems: PurchaseOrderItem[] = supplierMaterials.map(m => {
       const orderQty = m.currentStock <= m.reorderPoint ? m.eoq : m.moq;
@@ -253,12 +293,16 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
       .map((node) => node.outerHTML)
       .join('');
     const safeTitle = filename.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const originalTitle = document.title;
     const cleanup = () => {
       printWindow.removeEventListener('afterprint', cleanup);
+      document.title = originalTitle;
       iframe.remove();
     };
     printWindow.addEventListener('afterprint', cleanup);
     iframe.onload = () => {
+      document.title = filename;
+      printDocument.title = filename;
       printWindow.focus();
       printWindow.print();
     };
@@ -369,6 +413,7 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
               </h2>
               <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
                 등록 협력사 총 {suppliers.length}개사 관리 중
+                {otherMaterials.length > 0 ? ` · 기타 ${otherMaterials.length}종` : ''}
               </p>
             </div>
           </div>
@@ -398,10 +443,7 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 print:hidden">
         {suppliers.map((supplier) => {
           // Count items needing order
-          const matchedMaterials = materials.filter(m => 
-            m.supplier.toLowerCase().includes(supplier.name.toLowerCase().split('(')[0].trim()) ||
-            supplier.name.toLowerCase().includes(m.supplier.toLowerCase().split('(')[0].trim())
-          );
+          const matchedMaterials = materialsForSupplier(supplier);
           const needingOrder = matchedMaterials.filter(m => m.currentStock <= m.reorderPoint);
 
           return (
@@ -477,6 +519,50 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
             </div>
           );
         })}
+        {otherMaterials.length > 0 && (
+          <div className="bg-amber-50 border border-amber-300 rounded-xl p-5 shadow-xs flex flex-col justify-between">
+            <div>
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-xs font-bold text-amber-900 bg-amber-200 px-2 py-0.5 rounded">
+                  기타
+                </span>
+                <span className="text-[10px] font-semibold text-amber-800 bg-amber-100 px-2 py-0.5 rounded-full">
+                  등록 협력사 외
+                </span>
+              </div>
+              <h3 className="text-base font-bold text-amber-950 mt-1">기타</h3>
+              <p className="text-xs text-amber-900/80 mb-3">{otherSupplier.category}</p>
+              <div className="space-y-1 text-xs text-amber-950 bg-white/70 p-3 rounded-lg border border-amber-200">
+                {otherSourceNames.map((source) => (
+                  <div key={source} className="flex items-center justify-between gap-2">
+                    <span>{source}</span>
+                    <span className="font-mono text-amber-800">{otherMaterials.filter((item) => item.supplier === source).length}종</span>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-4 flex items-center justify-between text-xs">
+                <span className="text-amber-900">관리 품목: <strong>{otherMaterials.length}종</strong></span>
+                {otherMaterials.filter((item) => item.currentStock <= item.reorderPoint).length > 0 ? (
+                  <span className="text-amber-800 font-bold flex items-center gap-1">
+                    <AlertCircle className="w-3.5 h-3.5" />
+                    발주 필요 {otherMaterials.filter((item) => item.currentStock <= item.reorderPoint).length}건
+                  </span>
+                ) : (
+                  <span className="text-emerald-700 font-medium">재고 적정</span>
+                )}
+              </div>
+            </div>
+            <div className="mt-5 pt-3 border-t border-amber-200">
+              <button
+                onClick={() => handleGeneratePO(otherSupplier)}
+                className="w-full inline-flex items-center justify-center gap-1.5 py-2 px-3 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-lg shadow-xs transition-colors"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                <span>발주서 생성</span>
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Supplier Add / Edit Modal */}
@@ -796,6 +882,17 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
                 >
                   품목 추가
                 </button>
+                <div className="mt-3 grid grid-cols-[4.5rem_1fr] items-start gap-2">
+                  <span className="pt-1 text-xs font-bold text-slate-700">비고</span>
+                  <textarea
+                    value={activePO.remarks}
+                    onChange={(e) => updatePO({ remarks: e.target.value })}
+                    rows={2}
+                    placeholder="양식에 없는 내용을 적어 주세요."
+                    className={`${poField} w-full min-w-0 resize-none print:resize-none text-xs leading-5`}
+                    aria-label="비고"
+                  />
+                </div>
               </div>
 
               {/* Terms & Official Stamp */}

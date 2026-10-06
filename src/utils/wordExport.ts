@@ -32,6 +32,7 @@ export interface PurchaseOrderForm extends PurchaseOrder {
   buyerContact: string;
   paymentTerms: string;
   terms: string[];
+  remarks: string;
   stampLabel: string;
   stampOrg: string;
   stampMark: string;
@@ -49,6 +50,7 @@ export const DEFAULT_PURCHASE_ORDER_FORM = {
     '2. 납기요청일을 넘기면 지체일수마다 지체상금률 0.15%를 적용할 수 있습니다.',
     '3. 인수 검수에서 불량품이 확인되면 공급자는 해당 물품을 즉시 무상으로 교환해야 합니다.',
   ],
+  remarks: '',
   stampLabel: '발주처 확인인',
   stampOrg: '주식회사 루씨엠',
   stampMark: '직인생략',
@@ -267,6 +269,21 @@ export function buildPurchaseOrderDocument(po: PurchaseOrderForm): Document {
         parties,
         paragraph([run(' ')]),
         items,
+        paragraph([run(' ')]),
+        new Table({
+          width: { size: 9900, type: WidthType.DXA },
+          rows: [
+            new TableRow({
+              children: [
+                cell([[run('비고', { bold: true, size: 16 })]], 1400, { fill: 'F8FAFC' }),
+                cell(
+                  (po.remarks || ' ').split('\n').map((line) => [run(line || ' ', { size: 16 })]),
+                  8500,
+                ),
+              ],
+            }),
+          ],
+        }),
         paragraph([run(' ')]),
         footer,
       ],
