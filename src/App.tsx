@@ -10,22 +10,25 @@ import { CommonPartsMatrix } from './components/CommonPartsMatrix';
 import { AutoOrderSimulator } from './components/AutoOrderSimulator';
 import { SupplierOrderManager } from './components/SupplierOrderManager';
 import { RAW_MATERIALS_DATA } from './data/materialsData';
-import { AssemblyRecord, MaterialItem } from './types/inventory';
+import { MaterialItem } from './types/inventory';
 import { 
   getMaterialsFromDb, 
   saveMaterialToDb, 
   deleteMaterialFromDb, 
-  seedMaterialsToDb,
-  getAssemblyRecords,
-  saveAssemblyRecord,
+  seedMaterialsToDb 
 } from './lib/firebase';
-import { AssemblyProduct, modelUsage, productById } from './lib/productModels';
-import { Database, CheckCircle2, AlertCircle, RefreshCw, X } from 'lucide-react';
+import { 
+  fetchMaterialsFromGoogleSheet,
+  saveMaterialsToGoogleSheet,
+  GOOGLE_SCRIPT_WEBAPP_URL
+} from './utils/googleSheetSync';
+import { Database, CheckCircle2, AlertCircle, RefreshCw, X, Save, Loader2, FileSpreadsheet } from 'lucide-react';
 
 const STORAGE_KEY = 'lucciem_materials_inventory_v3_fact';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabType>('simulator');
+  const [editingMaterialForModal, setEditingMaterialForModal] = useState<MaterialItem | null>(null);
 
   // Materials State with LocalStorage fallback while Firebase loads
   const [materials, setMaterials] = useState<MaterialItem[]>(() => {
@@ -47,11 +50,12 @@ export default function App() {
   const pendingUpdatesRef = useRef<Map<number, MaterialItem>>(new Map());
   const deletedIdsRef = useRef<Set<number>>(new Set());
 
-  // Firebase DB 연동 상태
+  // Firebase DB 연동 상태 및 저장 중 애니메이션 상태
   const [dbStatus, setDbStatus] = useState<DbStatus>('loading');
+  const [isSaving, setIsSaving] = useState(false);
   const [dbMessage, setDbMessage] = useState<string>('Firebase DB 연결 및 데이터 조회 중...');
-  const [assemblies, setAssemblies] = useState<AssemblyRecord[]>([]);
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(null);
+
   const showToast = (text: string, type: 'success' | 'info' | 'error' = 'info') => {
     setToastMessage({ text, type });
     setTimeout(() => {
@@ -121,7 +125,7 @@ export default function App() {
         setDbStatus('connected');
         setDbMessage(`Firebase DB에서 ${dbMaterials.length}개 자재 정상 로드 완료`);
         if (isManualRefresh) {
-          showToast(`Firebase DB에서 ${dbMaterials.length}개 자재를 새로고침했습니다.`, 'success');
+          showToast(`Firebase DB에서 ${dbMaterials.length}개 자재를 성공적으로 불러왔습니다.`, 'success');
         }
       } else {
         // Firebase DB가 비어있는 경우 최초 시딩 진행
@@ -151,92 +155,7 @@ export default function App() {
   // 앱 최초 실행 시 Firebase DB에서 데이터 로드
   useEffect(() => {
     loadDataFromFirebase(false);
-    getAssemblyRecords()
-      .then(setAssemblies)
-      .catch((error) => {
-        console.error('조립 기록 조회 오류:', error);
-      });
   }, [loadDataFromFirebase]);
-
-  const roundQty = (value: number) => Math.round(value * 10000) / 10000;
-
-  const applyStockDelta = async (deltas: { id: number; delta: number }[]) => {
-    const timestamp = new Date().toISOString();
-    const deltaMap = new Map(deltas.map(entry => [entry.id, entry.delta]));
-    const changed: MaterialItem[] = [];
-    const next = materials.map(item => {
-      const delta = deltaMap.get(item.id);
-      if (delta == null) return item;
-      const updated: MaterialItem = {
-        ...item,
-        currentStock: roundQty(item.currentStock + delta),
-        updatedAt: timestamp,
-      };
-      pendingUpdatesRef.current.set(item.id, updated);
-      changed.push(updated);
-      return updated;
-    });
-    setMaterials(next);
-
-    setDbStatus('syncing');
-    await Promise.all(changed.map(item => saveMaterialToDb(item)));
-    setDbStatus('connected');
-    setTimeout(() => {
-      changed.forEach(item => {
-        if (pendingUpdatesRef.current.get(item.id)?.updatedAt === timestamp) {
-          pendingUpdatesRef.current.delete(item.id);
-        }
-      });
-    }, 5000);
-  };
-
-  const handleConfirmAssembly = async (product: AssemblyProduct, quantity: number) => {
-    const lines = materials
-      .map(item => {
-        const perUnit = modelUsage(item, product);
-        const deductQty = roundQty(perUnit * quantity);
-        return {
-          materialId: item.id,
-          name: item.name,
-          unit: item.unit,
-          perUnit,
-          deductQty,
-          stockBefore: item.currentStock,
-          stockAfter: roundQty(item.currentStock - deductQty),
-        };
-      })
-      .filter(line => line.perUnit > 0);
-
-    if (lines.length === 0) {
-      throw new Error('차감할 품목이 없습니다.');
-    }
-
-    await applyStockDelta(lines.map(line => ({ id: line.materialId, delta: -line.deductQty })));
-    const record: AssemblyRecord = {
-      id: `ASM-${Date.now()}`,
-      createdAt: new Date().toISOString(),
-      product,
-      productName: productById(product).name,
-      quantity,
-      lines,
-    };
-    await saveAssemblyRecord(record);
-    setAssemblies(prev => [record, ...prev]);
-    showToast(`${record.productName} ${quantity}대분 자재를 일괄 차감했습니다.`, 'success');
-  };
-
-  const handleReverseAssembly = async (record: AssemblyRecord) => {
-    if (record.reversedAt) return;
-    const present = record.lines.filter(line => materials.some(item => item.id === line.materialId));
-    if (present.length === 0) {
-      throw new Error('되돌릴 품목을 찾지 못했습니다.');
-    }
-    await applyStockDelta(present.map(line => ({ id: line.materialId, delta: line.deductQty })));
-    const reversed: AssemblyRecord = { ...record, reversedAt: new Date().toISOString() };
-    await saveAssemblyRecord(reversed);
-    setAssemblies(prev => prev.map(item => item.id === record.id ? reversed : item));
-    showToast(`${record.productName} ${record.quantity}대 차감을 취소하고 재고를 되돌렸습니다.`, 'success');
-  };
 
   // Sync to LocalStorage as auxiliary cache
   useEffect(() => {
@@ -362,30 +281,84 @@ export default function App() {
     }
   };
 
-  // 전체 데이터 강제 일괄 백업
+  // 전체 데이터 저장 (Firebase DB + 원장 구글 시트 4대 탭 동시 저장)
   const handleReseedDb = async () => {
-    if (!confirm('현재 화면에 표시된 모든 자재 데이터를 Firebase DB로 일괄 덮어쓰기 저장하시겠습니까?')) {
-      return;
-    }
+    setIsSaving(true);
+    const startTime = Date.now();
     try {
       setDbStatus('syncing');
-      setDbMessage(`Firebase DB에 ${materials.length}개 자재 일괄 저장 중...`);
+      setDbMessage(`Firebase DB 및 원장 구글 시트에 ${materials.length}개 자재 동시 저장 중...`);
+      
+      // 1. Firebase Firestore 일괄 저장
       await seedMaterialsToDb(materials);
+
+      // 2. 원장 구글 시트 4대 탭(옥외, 실내, 이동, L.SEND) 85행 정밀 매핑 일괄 저장
+      let sheetSuccess = false;
+      try {
+        const sheetRes = await saveMaterialsToGoogleSheet(materials, GOOGLE_SCRIPT_WEBAPP_URL);
+        sheetSuccess = sheetRes.success;
+      } catch (sheetErr: any) {
+        console.warn('구글 시트 저장 경고:', sheetErr);
+      }
+
+      // 사용자가 "저장 중..." 진행 상태를 인지할 수 있도록 최소 1.2초 표시 보장
+      const elapsed = Date.now() - startTime;
+      if (elapsed < 1200) {
+        await new Promise(r => setTimeout(r, 1200 - elapsed));
+      }
+
       const reloaded = await getMaterialsFromDb();
       setMaterials(reloaded);
       setDbStatus('connected');
-      setDbMessage(`Firebase DB에 ${reloaded.length}개 자재 일괄 저장 완료!`);
-      showToast(`Firebase DB에 총 ${reloaded.length}개 자재가 정상 저장되었습니다.`, 'success');
+
+      if (sheetSuccess) {
+        setDbMessage(`Firebase DB & 원장 구글 시트 4개 탭에 총 ${materials.length}종 자재 저장 완료!`);
+        showToast(`원장 구글 시트(옥외·실내·이동·L.SEND 4개 탭) 및 Firebase DB에 현재 재고·안전 재고가 정상 저장되었습니다!`, 'success');
+      } else {
+        setDbMessage(`Firebase DB에 ${materials.length}개 자재 저장 완료`);
+        showToast(`Firebase DB에 정상 저장되었습니다. (구글 시트 저장 확인 필요)`, 'info');
+      }
     } catch (err: any) {
       console.error('일괄 저장 실패:', err);
       setDbStatus('error');
-      showToast(`Firebase DB 일괄 저장 실패: ${err.message}`, 'error');
+      showToast(`저장 실패: ${err.message}`, 'error');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // 구글 시트 4대 탭에서 최신 자재 및 BOM 데이터 직접 가져오기
+  const handleSyncFromGoogleSheet = async () => {
+    try {
+      setDbStatus('loading');
+      setDbMessage('구글 시트 4개 탭에서 최신 BOM 데이터 불러오는 중...');
+      const sheetMaterials = await fetchMaterialsFromGoogleSheet();
+      if (sheetMaterials && sheetMaterials.length > 0) {
+        setMaterials(sheetMaterials);
+        setDbStatus('connected');
+        setDbMessage(`구글 시트에서 총 ${sheetMaterials.length}개 자재 정상 동기화 완료!`);
+        showToast(`원장 구글 시트로부터 총 ${sheetMaterials.length}개 자재를 성공적으로 불러왔습니다!`, 'success');
+        
+        // Firebase DB에도 일괄 자동 반영
+        try {
+          await seedMaterialsToDb(sheetMaterials);
+        } catch (dbErr) {
+          console.warn('Firebase 자동 백업 경고:', dbErr);
+        }
+      } else {
+        showToast('구글 시트에서 유효한 자재 데이터를 찾지 못했습니다.', 'error');
+        setDbStatus('connected');
+      }
+    } catch (err: any) {
+      console.error('구글 시트 동기화 실패:', err);
+      setDbStatus('error');
+      showToast(`구글 시트 동기화 실패: ${err.message || '네트워크 확인 필요'}`, 'error');
     }
   };
 
   return (
     <div className="min-h-screen bg-[#F4F5F8] text-slate-800 flex flex-col font-sans selection:bg-[#BA1B2D] selection:text-white">
-      {/* 상단 내비게이션 바 (Firebase 상태 및 동기화 버튼 포함) */}
+      {/* 상단 내비게이션 바 (저장, 불러오기, 시트 보기 버튼 포함) */}
       <Navbar
         activeTab={activeTab}
         setActiveTab={setActiveTab}
@@ -394,6 +367,9 @@ export default function App() {
         totalMaterialsCount={materials.length}
         onRefreshFromDb={() => loadDataFromFirebase(true)}
         onReseedDb={handleReseedDb}
+        onSyncFromGoogleSheet={handleSyncFromGoogleSheet}
+        isSaving={isSaving}
+        googleSheetUrl="https://docs.google.com/spreadsheets/d/1cqYtwVvxJU9UmQ0oHJYMFupGZDae5sN1bh3Grvrt7Xs/edit?usp=sharing"
       />
 
       {/* 메인 콘텐츠 영역 */}
@@ -404,6 +380,8 @@ export default function App() {
             onAddMaterial={handleAddMaterial}
             onUpdateMaterial={handleUpdateMaterial}
             onDeleteMaterial={handleDeleteMaterial}
+            initialEditingItem={editingMaterialForModal}
+            onClearInitialEditingItem={() => setEditingMaterialForModal(null)}
           />
         )}
 
@@ -416,9 +394,10 @@ export default function App() {
         {activeTab === 'simulator' && (
           <AutoOrderSimulator 
             materials={materials}
-            assemblies={assemblies}
-            onConfirmAssembly={handleConfirmAssembly}
-            onReverseAssembly={handleReverseAssembly}
+            onEditMaterial={(item) => {
+              setEditingMaterialForModal(item);
+              setActiveTab('materials');
+            }}
           />
         )}
 
@@ -428,6 +407,42 @@ export default function App() {
           />
         )}
       </main>
+
+      {/* 데이터 저장 중 전면 애니메이션 오버레이 */}
+      {isSaving && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in">
+          <div className="bg-white rounded-2xl shadow-2xl p-6 sm:p-8 max-w-md w-full border border-slate-200 text-center space-y-5">
+            <div className="relative mx-auto w-16 h-16 flex items-center justify-center">
+              <div className="absolute inset-0 rounded-full border-4 border-rose-100 animate-pulse" />
+              <div className="absolute inset-0 rounded-full border-4 border-t-[#BA1B2D] border-r-transparent border-b-transparent border-l-transparent animate-spin" />
+              <Save className="w-7 h-7 text-[#BA1B2D]" />
+            </div>
+
+            <div className="space-y-1.5">
+              <h3 className="text-lg font-bold text-slate-900">원장 구글 시트 & DB 동시 저장 중...</h3>
+              <p className="text-xs text-slate-500 leading-relaxed">
+                현재 재고와 안전 재고 데이터를 <strong>원장 구글 시트 4개 탭(옥외·실내·이동·L.SEND)</strong> 및 <strong>Firebase DB</strong>에 안전하게 기록하고 있습니다.
+              </p>
+            </div>
+
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 text-xs text-left space-y-2.5">
+              <div className="flex items-center gap-2 text-emerald-700 font-semibold">
+                <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                <span>1단계: Firebase 클라우드 DB 데이터 동기화</span>
+              </div>
+              <div className="flex items-center gap-2 text-[#BA1B2D] font-bold">
+                <Loader2 className="w-4 h-4 text-[#BA1B2D] animate-spin shrink-0" />
+                <span>2단계: 구글 시트 4대 탭(85개 행) 현재/안전재고 기록 중...</span>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-center gap-1.5 text-[11px] text-slate-400">
+              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+              <span>창을 닫지 마시고 잠시만 기다려 주세요.</span>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 실시간 알림 토스트 */}
       {toastMessage && (

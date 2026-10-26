@@ -34,43 +34,8 @@
     margin-bottom: 24px !important;
   }
 
-  #purchase-order-document,
-  #purchase-order-document * {
-    visibility: visible;
-  }
-
-  #purchase-order-document {
-    width: 100% !important;
-    max-width: 100% !important;
-  }
-
-  #purchase-order-document table {
-    width: 100% !important;
-    table-layout: fixed;
-  }
-
-  #purchase-order-document input,
-  #purchase-order-document textarea {
-    min-width: 0;
-    max-width: 100%;
-    resize: none !important;
-  }
-
-  #purchase-order-document textarea::-webkit-resizer {
-    display: none;
-  }
-
-  #purchase-order-document thead {
-    display: table-header-group;
-  }
-
-  #purchase-order-document tr {
-    break-inside: avoid;
-    page-break-inside: avoid;
-  }
-
   @page {
     size: A4 portrait;
-    margin: 10mm;
+    margin: 15mm 15mm 15mm 15mm;
   }
 }

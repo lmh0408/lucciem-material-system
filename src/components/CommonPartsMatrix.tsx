@@ -5,7 +5,7 @@ import {
   Building2,
   Tag
 } from 'lucide-react';
-import { SIMILAR_PART_GROUPS } from '../data/divergentPartsData';
+import { CROSS_SHEET_COMPARISON_MAP } from '../data/divergentPartsData';
 import { RAW_MATERIALS_DATA } from '../data/materialsData';
 import { MaterialItem } from '../types/inventory';
 
@@ -19,49 +19,43 @@ export const CommonPartsMatrix: React.FC<CommonPartsMatrixProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedSupplier, setSelectedSupplier] = useState<string>('ALL');
 
+  // 자재 DB (materials) 중 원장 간 표기 상이로 통합 관리가 필요한 품목 매핑 (일치 완료 품목은 제외)
   const divergentList = useMemo(() => {
-    const notation = (
-      mat: MaterialItem,
-      model: 'outdoor' | 'indoor' | 'mobile',
-      ledgerName?: string,
-    ) => {
-      if ((mat.usedIn?.[model] ?? 0) <= 0) return null;
+    // CROSS_SHEET_COMPARISON_MAP에 정의된 실제 표기 상이 품목만 필터링
+    const targetCodes = Object.keys(CROSS_SHEET_COMPARISON_MAP);
+    const matchedMaterials = materials.filter(m => targetCodes.includes(m.standardCode));
+
+    return matchedMaterials.map((mat) => {
+      const comparison = CROSS_SHEET_COMPARISON_MAP[mat.standardCode];
+      const outdoorSheet = comparison?.outdoorSheetName || mat.name;
+      const indoorSheet = comparison?.indoorSheetName || mat.name;
+      const mobileSheet = comparison?.mobileSheetName || mat.name;
+      const analysis = comparison?.analysis || mat.notes;
+      const solution = comparison?.solution || '표준 코드로 통합 발주 관리';
+
+      const usageCount = (mat.usedIn.outdoor > 0 ? 1 : 0) + 
+                         (mat.usedIn.indoor > 0 ? 1 : 0) + 
+                         (mat.usedIn.mobile > 0 ? 1 : 0) + 
+                         (mat.usedIn.lsend > 0 ? 1 : 0);
+
       return {
-        name: ledgerName || mat.name,
-        spec: mat.spec,
+        id: mat.id,
+        standardCode: mat.standardCode,
+        dbName: mat.name, // 자재 DB 실시간 등록명
+        dbSpec: mat.spec, // 자재 DB 실시간 규격
+        dbSupplier: mat.supplier, // 자재 DB 실시간 공급처
+        dbUnitPrice: mat.unitPrice, // 자재 DB 실시간 단가
+        usedIn: mat.usedIn,
+        currentStock: mat.currentStock,
+        usageCount,
+        variants: {
+          outdoor: outdoorSheet,
+          indoor: indoorSheet,
+          mobile: mobileSheet,
+        },
+        analysis,
+        solution,
       };
-    };
-
-    return SIMILAR_PART_GROUPS.flatMap((group) => {
-      return group.members.flatMap((member) => {
-        const mat = materials.find(item => item.standardCode === member.standardCode);
-        if (!mat) return [];
-
-        const variants = {
-          outdoor: notation(mat, 'outdoor', member.ledgerNames?.outdoor),
-          indoor: notation(mat, 'indoor', member.ledgerNames?.indoor),
-          mobile: notation(mat, 'mobile', member.ledgerNames?.mobile),
-        };
-        const usageCount = (mat.usedIn.outdoor > 0 ? 1 : 0) +
-                           (mat.usedIn.indoor > 0 ? 1 : 0) +
-                           (mat.usedIn.mobile > 0 ? 1 : 0) +
-                           (mat.usedIn.lsend > 0 ? 1 : 0);
-
-        return [{
-          id: mat.id,
-          groupId: group.id,
-          groupLabel: group.label,
-          standardCode: mat.standardCode,
-          dbName: mat.name,
-          dbSpec: mat.spec,
-          dbSupplier: mat.supplier,
-          dbUnitPrice: mat.unitPrice,
-          usageCount,
-          variants,
-          analysis: group.analysis,
-          solution: group.solution,
-        }];
-      });
     });
   }, [materials]);
 
@@ -78,20 +72,16 @@ export const CommonPartsMatrix: React.FC<CommonPartsMatrixProps> = ({
   // 필터링된 자재 목록
   const filteredList = useMemo(() => {
     return divergentList.filter(item => {
-      const keyword = searchTerm.toLowerCase();
-      const variantText = [item.variants.outdoor, item.variants.indoor, item.variants.mobile]
-        .flatMap(cell => cell ? [cell.name, cell.spec] : [])
-        .join(' ')
-        .toLowerCase();
       const matchSearch = 
-        item.standardCode.toLowerCase().includes(keyword) ||
-        item.groupLabel.toLowerCase().includes(keyword) ||
-        item.dbName.toLowerCase().includes(keyword) ||
-        item.dbSpec.toLowerCase().includes(keyword) ||
-        item.dbSupplier.toLowerCase().includes(keyword) ||
-        variantText.includes(keyword) ||
-        item.analysis.toLowerCase().includes(keyword) ||
-        item.solution.toLowerCase().includes(keyword);
+        item.standardCode.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        item.dbName.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        item.dbSpec.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        item.dbSupplier.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        item.variants.outdoor.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        item.variants.indoor.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        item.variants.mobile.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        item.analysis.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        item.solution.toLowerCase().includes(searchTerm.toLowerCase());
 
       const matchSupplier = 
         selectedSupplier === 'ALL' || item.dbSupplier.includes(selectedSupplier);
@@ -114,13 +104,19 @@ export const CommonPartsMatrix: React.FC<CommonPartsMatrixProps> = ({
                 <h1 className="text-xl font-bold text-slate-900">
                   동일 자재 품명 상이 현황 및 통합 관리
                 </h1>
-                <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
-                  관리 대상 {divergentList.length}종
+                <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-rose-100 text-[#BA1B2D] border border-rose-300">
+                  동일 규격 표기 상이 {divergentList.length}종
+                </span>
+                <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                  규격 상이 품목 제외 적용
                 </span>
               </div>
               <p className="text-xs sm:text-sm text-slate-600 mt-1">
-                같은 부품인데 원장마다 품명이 다른 경우만 여기에 둡니다. 지금은 해당 품목이 없습니다.
+                물리적 규격이 완전히 동일함에도 보관함 원장 시트마다 제각각 다른 품명으로 발주·기록되거나 공급 채널이 분기된 품목의 원인을 분석하고, 단일 표준 품명 및 통합 발주 일원화 방안을 제시합니다.
               </p>
+              <div className="mt-2 text-[11px] text-slate-500 flex flex-wrap gap-x-3 gap-y-1">
+                <span>※ <strong>제외 품목 안내:</strong> 원장 및 DB 일치 품목(푸시버튼, 탈착스위치, 배터리홀더, RJ45단자) 및 품명은 유사하나 물리적 규격이 상이한 품목(경광등 24V/12V, 볼트 M8/4T 등)은 대상에서 제외되었습니다.</span>
+              </div>
             </div>
           </div>
         </div>
@@ -148,7 +144,7 @@ export const CommonPartsMatrix: React.FC<CommonPartsMatrixProps> = ({
               <span>관리 상태</span>
               <Tag className="w-4 h-4 text-amber-600" />
             </div>
-            <div className="text-2xl font-black text-amber-950">{divergentList.length === 0 ? '대상 없음' : '표준화 추진 중'}</div>
+            <div className="text-2xl font-black text-amber-950">표준화 추진 중</div>
           </div>
         </div>
       </div>
@@ -229,17 +225,17 @@ export const CommonPartsMatrix: React.FC<CommonPartsMatrixProps> = ({
             <thead className="bg-slate-100/80 text-slate-700 font-bold border-b border-slate-200">
               <tr>
                 <th className="py-3 px-3 w-12 text-center">No</th>
-                <th className="py-3 px-3 min-w-[190px]">품목명</th>
-                <th className="py-3 px-3 min-w-[140px]">상세 규격</th>
+                <th className="py-3 px-3 min-w-[190px]">자재 DB 표준 등록명 (코드)</th>
+                <th className="py-3 px-3 min-w-[140px]">자재 DB 규격 사양</th>
                 <th className="py-3 px-3 text-center min-w-[100px]">상태</th>
-                <th className="py-3 px-3 text-center bg-emerald-50 text-emerald-950 border-l border-r border-slate-200 min-w-[160px]">
-                  옥외보관함 품목명 / 상세 규격
+                <th className="py-3 px-3 text-center bg-emerald-50 text-emerald-950 border-l border-r border-slate-200 min-w-[130px]">
+                  옥외보관함 원장 기재명
                 </th>
-                <th className="py-3 px-3 text-center bg-rose-50 text-rose-950 border-r border-slate-200 min-w-[160px]">
-                  스마트 실내보관함 품목명 / 상세 규격
+                <th className="py-3 px-3 text-center bg-rose-50 text-rose-950 border-r border-slate-200 min-w-[130px]">
+                  실내보관함 원장 기재명
                 </th>
-                <th className="py-3 px-3 text-center bg-amber-50 text-amber-950 border-r border-slate-200 min-w-[160px]">
-                  이동형보관함 품목명 / 상세 규격
+                <th className="py-3 px-3 text-center bg-amber-50 text-amber-950 border-r border-slate-200 min-w-[140px]">
+                  이동형보관함 원장 기재명
                 </th>
                 <th className="py-3 px-3 min-w-[120px]">주 공급처</th>
                 <th className="py-3 px-3 text-right min-w-[80px]">DB 단가</th>
@@ -250,7 +246,7 @@ export const CommonPartsMatrix: React.FC<CommonPartsMatrixProps> = ({
               {filteredList.length === 0 ? (
                 <tr>
                   <td colSpan={10} className="py-12 text-center text-slate-400">
-                    현재 원장 간 품명이 다른 동일 부품은 없습니다.
+                    일치하는 표기 상이 자재 항목이 없습니다.
                   </td>
                 </tr>
               ) : (
@@ -260,7 +256,6 @@ export const CommonPartsMatrix: React.FC<CommonPartsMatrixProps> = ({
                       {idx + 1}
                     </td>
                     <td className="py-3 px-3">
-                      <div className="text-[10px] font-semibold text-slate-500">{item.groupLabel}</div>
                       <div className="font-bold text-slate-900 text-xs sm:text-sm">
                         {item.dbName}
                       </div>
@@ -280,29 +275,28 @@ export const CommonPartsMatrix: React.FC<CommonPartsMatrixProps> = ({
 
                     {/* 대조 상태 배지 */}
                     <td className="py-3 px-3 text-center">
-                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold border shadow-2xs bg-emerald-100 text-emerald-900 border-emerald-300">
-                        품명 유지
+                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-rose-100 text-[#BA1B2D] border border-rose-300 shadow-2xs">
+                        <AlertTriangle className="w-3 h-3 text-[#BA1B2D]" />
+                        표기 상이
                       </span>
                     </td>
 
-                    {(['outdoor', 'indoor', 'mobile'] as const).map((model) => {
-                      const cell = item.variants[model];
-                      const tone = model === 'outdoor'
-                        ? 'border-l border-r border-slate-200 bg-emerald-50/20'
-                        : 'border-r border-slate-200 ' + (model === 'indoor' ? 'bg-rose-50/20' : 'bg-amber-50/20');
-                      return (
-                        <td key={model} className={`py-3 px-3 ${tone}`}>
-                          {cell ? (
-                            <div className="text-left">
-                              <div className="font-bold text-slate-900">{cell.name}</div>
-                              <div className="text-[11px] text-slate-500 mt-0.5" title={cell.spec}>{cell.spec}</div>
-                            </div>
-                          ) : (
-                            <span className="block text-center text-slate-300">미사용</span>
-                          )}
-                        </td>
-                      );
-                    })}
+                    {/* 원장별 기재명 3개 열 */}
+                    <td className="py-3 px-3 text-center border-l border-r border-slate-200 bg-emerald-50/20">
+                      <span className="inline-block px-2 py-1 rounded bg-emerald-100/90 text-emerald-950 font-semibold text-[11px]">
+                        {item.variants.outdoor}
+                      </span>
+                    </td>
+                    <td className="py-3 px-3 text-center border-r border-slate-200 bg-rose-50/20">
+                      <span className="inline-block px-2 py-1 rounded bg-rose-100/90 text-rose-950 font-semibold text-[11px]">
+                        {item.variants.indoor}
+                      </span>
+                    </td>
+                    <td className="py-3 px-3 text-center border-r border-slate-200 bg-amber-50/20">
+                      <span className="inline-block px-2 py-1 rounded bg-amber-100/90 text-amber-950 font-semibold text-[11px]">
+                        {item.variants.mobile}
+                      </span>
+                    </td>
 
                     <td className="py-3 px-3 text-slate-800 font-semibold">
                       {item.dbSupplier}
@@ -316,7 +310,7 @@ export const CommonPartsMatrix: React.FC<CommonPartsMatrixProps> = ({
                         {item.analysis}
                       </div>
                       <div className="text-[#BA1B2D] font-bold mt-1 bg-rose-50/80 p-1.5 rounded border border-rose-100">
-                        <span className="mr-1">↳ [유지 결정]</span>
+                        <span className="mr-1">↳ [통합 방안]</span>
                         {item.solution}
                       </div>
                     </td>

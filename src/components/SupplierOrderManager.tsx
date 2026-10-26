@@ -3,8 +3,10 @@ import {
   Building2, 
   Phone, 
   User, 
+  Send, 
   Printer, 
   FileText, 
+  CheckCircle2, 
   AlertCircle, 
   DollarSign,
   FileDown,
@@ -15,32 +17,8 @@ import {
   X
 } from 'lucide-react';
 import { SUPPLIERS_LIST, RAW_MATERIALS_DATA } from '../data/materialsData';
-
-function supplierMatchKey(name: string): string {
-  const aliases: Record<string, string> = { aliexpress: '알리익스프레스' };
-  const key = name
-    .toLowerCase()
-    .replace(/주식회사/g, '')
-    .replace(/\(주\)|㈜/g, '')
-    .replace(/\([^)]*\)/g, '')
-    .replace(/[-–—]/g, '')
-    .replace(/\s+/g, '');
-  return aliases[key] ?? key;
-}
-
-function supplierMatchParts(name: string): string[] {
-  return name.split('/').map(supplierMatchKey).filter((part) => part.length > 0);
-}
-
-function materialBelongsToSupplier(materialSupplier: string, supplierName: string): boolean {
-  const supplierParts = supplierMatchParts(supplierName);
-  const materialParts = supplierMatchParts(materialSupplier);
-  return materialParts.some((part) => supplierParts.includes(part));
-}
-
-const OTHER_SUPPLIER_ID = 'OTHER';
-import { SupplierInfo, PurchaseOrderItem, MaterialItem } from '../types/inventory';
-import { DEFAULT_PURCHASE_ORDER_FORM, PurchaseOrderForm, downloadPurchaseOrderAsWord, purchaseOrderFileBase } from '../utils/wordExport';
+import { SupplierInfo, PurchaseOrder, PurchaseOrderItem, MaterialItem } from '../types/inventory';
+import { downloadElementAsPDF } from '../utils/pdfExport';
 import { 
   getSuppliersFromDb, 
   saveSupplierToDb, 
@@ -116,8 +94,9 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
   });
 
   const [selectedSupplier, setSelectedSupplier] = useState<SupplierInfo | null>(null);
-  const [activePO, setActivePO] = useState<PurchaseOrderForm | null>(null);
-  const [isSavingWord, setIsSavingWord] = useState(false);
+  const [activePO, setActivePO] = useState<PurchaseOrder | null>(null);
+  const [sentSuccess, setSentSuccess] = useState(false);
+  const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
 
   // Open add modal
   const handleOpenAddModal = () => {
@@ -183,35 +162,17 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
 
   // Delete supplier
   const handleDeleteSupplier = (supplier: SupplierInfo) => {
-    if (confirm(`'${supplier.name}' 협력사를 관리 목록에서 삭제하시겠습니까?`)) {
-      setSuppliers(prev => prev.filter(s => s.id !== supplier.id));
-      deleteSupplierFromDb(supplier.id).catch(err => console.error('Error deleting supplier from DB:', err));
-    }
-  };
-
-  const materialsForSupplier = (supplier: SupplierInfo) => {
-    if (supplier.id === OTHER_SUPPLIER_ID) {
-      return materials.filter((item) => !suppliers.some((registered) => materialBelongsToSupplier(item.supplier, registered.name)));
-    }
-    return materials.filter((item) => materialBelongsToSupplier(item.supplier, supplier.name));
-  };
-
-  const otherMaterials = materialsForSupplier({ id: OTHER_SUPPLIER_ID } as SupplierInfo);
-  const otherSourceNames = [...new Set(otherMaterials.map((item) => item.supplier))];
-  const otherSupplier: SupplierInfo = {
-    id: OTHER_SUPPLIER_ID,
-    name: '기타',
-    contactPerson: '등록 협력사 외 구매',
-    phone: '',
-    itemsCount: otherMaterials.length,
-    category: otherSourceNames.join(', '),
-    reliability: 'C',
-    leadTimeAvgDays: 7,
+    setSuppliers(prev => prev.filter(s => s.id !== supplier.id));
+    deleteSupplierFromDb(supplier.id).catch(err => console.error('Error deleting supplier from DB:', err));
   };
 
   // Generate PO for a selected supplier
   const handleGeneratePO = (supplier: SupplierInfo) => {
-    const supplierMaterials = materialsForSupplier(supplier);
+    // Find all materials from this supplier that need order or all materials from this supplier
+    const supplierMaterials = materials.filter(m => 
+      m.supplier.toLowerCase().includes(supplier.name.toLowerCase().split('(')[0].trim()) ||
+      supplier.name.toLowerCase().includes(m.supplier.toLowerCase().split('(')[0].trim())
+    );
 
     const poItems: PurchaseOrderItem[] = supplierMaterials.map(m => {
       const orderQty = m.currentStock <= m.reorderPoint ? m.eoq : m.moq;
@@ -239,8 +200,7 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
     const dueDate = new Date();
     dueDate.setDate(today.getDate() + supplier.leadTimeAvgDays);
 
-    const generatedPO: PurchaseOrderForm = {
-      ...DEFAULT_PURCHASE_ORDER_FORM,
+    const generatedPO: PurchaseOrder = {
       orderNumber: `발주-${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}-${supplier.id}`,
       orderDate: today.toISOString().slice(0, 10),
       supplier: supplier.name,
@@ -256,122 +216,47 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
 
     setSelectedSupplier(supplier);
     setActivePO(generatedPO);
+    setSentSuccess(false);
   };
 
-  const handleDownloadPOWord = async () => {
-    if (!activePO || isSavingWord) return;
+  const handleDownloadPO_PDF = async () => {
+    if (!activePO || isGeneratingPdf) return;
     try {
-      setIsSavingWord(true);
-      await downloadPurchaseOrderAsWord(activePO);
+      setIsGeneratingPdf(true);
+      await downloadElementAsPDF('purchase-order-document', {
+        filename: `루씨엠_발주서_${activePO.supplier}_${activePO.orderNumber}.pdf`,
+      });
     } catch (e) {
-      console.error('Failed to generate PO Word file', e);
-      alert('발주서 Word 파일 저장에 실패했습니다.');
+      console.error('Failed to generate PO PDF', e);
+      window.print();
     } finally {
-      setIsSavingWord(false);
+      setIsGeneratingPdf(false);
     }
   };
 
   const handlePrintPO = () => {
-    if (!activePO) return;
-    const source = document.getElementById('purchase-order-document');
-    if (!source) return;
-
-    const filename = purchaseOrderFileBase(activePO);
-    const iframe = document.createElement('iframe');
-    iframe.setAttribute('aria-hidden', 'true');
-    iframe.style.cssText = 'position:fixed;left:-10000px;top:0;width:210mm;height:297mm;border:0;';
-    document.body.appendChild(iframe);
-
-    const printDocument = iframe.contentDocument;
-    const printWindow = iframe.contentWindow;
-    if (!printDocument || !printWindow) {
-      iframe.remove();
-      return;
+    try {
+      window.print();
+    } catch {
+      handleDownloadPO_PDF();
     }
-
-    const styles = [...document.querySelectorAll('style, link[rel="stylesheet"]')]
-      .map((node) => node.outerHTML)
-      .join('');
-    const safeTitle = filename.replace(/&/g, '&amp;').replace(/</g, '&lt;');
-    const originalTitle = document.title;
-    const cleanup = () => {
-      printWindow.removeEventListener('afterprint', cleanup);
-      document.title = originalTitle;
-      iframe.remove();
-    };
-    printWindow.addEventListener('afterprint', cleanup);
-    iframe.onload = () => {
-      document.title = filename;
-      printDocument.title = filename;
-      printWindow.focus();
-      printWindow.print();
-    };
-    printDocument.open();
-    printDocument.write(`<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>${safeTitle}</title>${styles}<style>@page{size:A4 portrait;margin:10mm}html,body{margin:0;background:#fff}#purchase-order-document{width:100%;border:0}textarea,input{resize:none!important}</style></head><body>${source.outerHTML}</body></html>`);
-    printDocument.close();
   };
 
-  const updatePO = (patch: Partial<PurchaseOrderForm>) => {
-    setActivePO(prev => prev ? { ...prev, ...patch } : prev);
+  const handleSendPO = () => {
+    setSentSuccess(true);
+    setTimeout(() => {
+      setSentSuccess(false);
+    }, 4000);
   };
-
-  const withTotals = (items: PurchaseOrderItem[]) => {
-    const priced = items.map(item => {
-      const orderQty = Number(item.orderQty) || 0;
-      const unitPrice = Number(item.unitPrice) || 0;
-      return { ...item, orderQty, unitPrice, totalPrice: orderQty * unitPrice };
-    });
-    const totalAmount = priced.reduce((sum, item) => sum + (Number(item.totalPrice) || 0), 0);
-    const vatAmount = Math.round(totalAmount * 0.1);
-    return { items: priced, totalAmount, vatAmount, grandTotal: totalAmount + vatAmount };
-  };
-
-  const updateItem = (index: number, patch: Partial<PurchaseOrderItem>) => {
-    setActivePO(prev => {
-      if (!prev) return prev;
-      const items = prev.items.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item);
-      return { ...prev, ...withTotals(items) };
-    });
-  };
-
-  const removeItem = (index: number) => {
-    setActivePO(prev => {
-      if (!prev) return prev;
-      return { ...prev, ...withTotals(prev.items.filter((_, itemIndex) => itemIndex !== index)) };
-    });
-  };
-
-  const addItem = () => {
-    setActivePO(prev => {
-      if (!prev) return prev;
-      const blank: PurchaseOrderItem = {
-        materialId: 0,
-        name: '',
-        spec: '',
-        unit: 'EA',
-        unitPrice: 0,
-        orderQty: 0,
-        totalPrice: 0,
-        currentStock: 0,
-        safetyStock: 0,
-        supplier: prev.supplier,
-        reason: '',
-      };
-      return { ...prev, ...withTotals([...prev.items, blank]) };
-    });
-  };
-
-  const poField = 'bg-transparent border border-transparent hover:border-slate-300 focus:border-[#BA1B2D] focus:bg-white focus:outline-none rounded px-0.5 print:border-transparent';
 
   // Export CSV of materials needing order
   const handleExportOrderNeededCSV = () => {
     const orderNeededList = materials.filter(m => {
-      const rop = m.reorderPoint;
+      const rop = m.reorderPoint > 0 ? m.reorderPoint : (m.safetyStock || 30);
       return m.currentStock <= rop;
     });
 
     if (orderNeededList.length === 0) {
-      alert('현재 재발주 기준점 이하인 발주 대상 자재가 없습니다.');
       return;
     }
 
@@ -382,7 +267,7 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
       `"${item.spec}"`,
       item.unitPrice,
       item.currentStock,
-      item.reorderPoint,
+      item.reorderPoint > 0 ? item.reorderPoint : item.safetyStock,
       item.leadTimeDays,
       `"${item.supplier}"`,
     ]);
@@ -399,9 +284,9 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
   };
 
   return (
-    <div className="space-y-6 max-w-7xl mx-auto py-4 print:space-y-0 print:py-0 print:max-w-none">
+    <div className="space-y-6 max-w-7xl mx-auto py-4">
       {/* Header Banner */}
-      <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 shadow-xs print:hidden">
+      <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 shadow-xs">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="p-2.5 bg-rose-100 text-[#BA1B2D] rounded-xl">
@@ -413,7 +298,6 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
               </h2>
               <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
                 등록 협력사 총 {suppliers.length}개사 관리 중
-                {otherMaterials.length > 0 ? ` · 기타 ${otherMaterials.length}종` : ''}
               </p>
             </div>
           </div>
@@ -440,10 +324,13 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
       </div>
 
       {/* Suppliers Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 print:hidden">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {suppliers.map((supplier) => {
           // Count items needing order
-          const matchedMaterials = materialsForSupplier(supplier);
+          const matchedMaterials = materials.filter(m => 
+            m.supplier.toLowerCase().includes(supplier.name.toLowerCase().split('(')[0].trim()) ||
+            supplier.name.toLowerCase().includes(m.supplier.toLowerCase().split('(')[0].trim())
+          );
           const needingOrder = matchedMaterials.filter(m => m.currentStock <= m.reorderPoint);
 
           return (
@@ -513,61 +400,17 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
                   className="w-full inline-flex items-center justify-center gap-1.5 py-2 px-3 text-xs font-semibold text-white bg-[#BA1B2D] hover:bg-[#a01625] rounded-lg shadow-xs transition-colors"
                 >
                   <FileText className="w-3.5 h-3.5" />
-                  <span>발주서 생성</span>
+                  <span>정식 발주서 자동 생성</span>
                 </button>
               </div>
             </div>
           );
         })}
-        {otherMaterials.length > 0 && (
-          <div className="bg-amber-50 border border-amber-300 rounded-xl p-5 shadow-xs flex flex-col justify-between">
-            <div>
-              <div className="flex items-center gap-2 mb-2">
-                <span className="text-xs font-bold text-amber-900 bg-amber-200 px-2 py-0.5 rounded">
-                  기타
-                </span>
-                <span className="text-[10px] font-semibold text-amber-800 bg-amber-100 px-2 py-0.5 rounded-full">
-                  등록 협력사 외
-                </span>
-              </div>
-              <h3 className="text-base font-bold text-amber-950 mt-1">기타</h3>
-              <p className="text-xs text-amber-900/80 mb-3">{otherSupplier.category}</p>
-              <div className="space-y-1 text-xs text-amber-950 bg-white/70 p-3 rounded-lg border border-amber-200">
-                {otherSourceNames.map((source) => (
-                  <div key={source} className="flex items-center justify-between gap-2">
-                    <span>{source}</span>
-                    <span className="font-mono text-amber-800">{otherMaterials.filter((item) => item.supplier === source).length}종</span>
-                  </div>
-                ))}
-              </div>
-              <div className="mt-4 flex items-center justify-between text-xs">
-                <span className="text-amber-900">관리 품목: <strong>{otherMaterials.length}종</strong></span>
-                {otherMaterials.filter((item) => item.currentStock <= item.reorderPoint).length > 0 ? (
-                  <span className="text-amber-800 font-bold flex items-center gap-1">
-                    <AlertCircle className="w-3.5 h-3.5" />
-                    발주 필요 {otherMaterials.filter((item) => item.currentStock <= item.reorderPoint).length}건
-                  </span>
-                ) : (
-                  <span className="text-emerald-700 font-medium">재고 적정</span>
-                )}
-              </div>
-            </div>
-            <div className="mt-5 pt-3 border-t border-amber-200">
-              <button
-                onClick={() => handleGeneratePO(otherSupplier)}
-                className="w-full inline-flex items-center justify-center gap-1.5 py-2 px-3 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-lg shadow-xs transition-colors"
-              >
-                <FileText className="w-3.5 h-3.5" />
-                <span>발주서 생성</span>
-              </button>
-            </div>
-          </div>
-        )}
       </div>
 
       {/* Supplier Add / Edit Modal */}
       {isModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto print:hidden">
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
           <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 border border-slate-200">
             <div className="flex items-center justify-between border-b border-slate-100 pb-3 mb-4">
               <div className="flex items-center gap-2">
@@ -695,8 +538,8 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
 
       {/* Formal Purchase Order Modal / Printable Area */}
       {activePO && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 overflow-y-auto overflow-x-hidden print:static print:inset-auto print:overflow-visible print:h-auto print:bg-transparent print:p-0 print:block">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full min-w-0 p-6 sm:p-10 my-auto border border-slate-200 relative print:max-w-none print:border-none print:shadow-none print:p-0 print:rounded-none">
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 overflow-y-auto print:p-0 print:bg-transparent print:relative">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full p-6 sm:p-10 my-auto border border-slate-200 relative print:border-none print:shadow-none print:p-0">
             {/* Modal Controls (Hidden in Print) */}
             <div className="flex items-center justify-between border-b border-slate-200 pb-4 mb-6 print:hidden">
               <div className="flex items-center gap-2">
@@ -704,19 +547,18 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
                   발주서 초안
                 </span>
                 <span className="text-sm font-bold text-slate-800">
-                  발주서 편집
+                  발주서 미리보기
                 </span>
-                <span className="text-[11px] text-slate-500">문서 안 글자를 눌러 수정할 수 있습니다.</span>
               </div>
 
               <div className="flex items-center gap-2 flex-wrap">
                 <button
-                  onClick={handleDownloadPOWord}
-                  disabled={isSavingWord}
+                  onClick={handleDownloadPO_PDF}
+                  disabled={isGeneratingPdf}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-[#BA1B2D] hover:bg-[#a01625] rounded-lg shadow-xs transition-colors disabled:opacity-50"
-                  title="발주서를 편집 가능한 Word 파일로 저장"
+                  title="발주서를 파일로 저장"
                 >
-                  {isSavingWord ? (
+                  {isGeneratingPdf ? (
                     <>
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
                       <span>저장 중...</span>
@@ -738,6 +580,14 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
                 </button>
 
                 <button
+                  onClick={handleSendPO}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-[#BA1B2D] hover:bg-[#a01625] rounded-lg transition-colors shadow-xs"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>거래처 발송</span>
+                </button>
+
+                <button
                   onClick={() => setActivePO(null)}
                   className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100"
                 >
@@ -746,113 +596,77 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
               </div>
             </div>
 
+            {sentSuccess && (
+              <div className="mb-4 p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-xs font-bold text-emerald-800 flex items-center gap-2 print:hidden">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                <span>발주서가 거래처 담당자({activePO.contactPerson})에게 정상 발송 처리되었습니다.</span>
+              </div>
+            )}
+
             {/* Official Purchase Order Document Sheet */}
-            <div id="purchase-order-document" className="border-2 border-slate-900 p-4 sm:p-6 space-y-4 text-slate-900 font-sans bg-white max-w-full min-w-0 overflow-x-hidden print:p-0 print:space-y-3 print:border-0">
+            <div id="purchase-order-document" className="border-2 border-slate-900 p-6 sm:p-8 space-y-6 text-slate-900 font-sans bg-white">
               {/* PO Title & Doc Number */}
-              <div className="flex flex-col sm:flex-row sm:items-end justify-between border-b-2 border-slate-900 pb-4 gap-3">
-                <input
-                  value={activePO.title}
-                  onChange={(e) => updatePO({ title: e.target.value })}
-                  className={`${poField} w-full min-w-0 text-2xl sm:text-3xl font-black tracking-widest text-slate-900 sm:max-w-[280px]`}
-                  aria-label="발주서 제목"
-                />
-                <div className="mt-2 sm:mt-0 flex flex-col items-start text-left text-xs">
-                  <input
-                    value={activePO.orderNumber}
-                    onChange={(e) => updatePO({ orderNumber: e.target.value })}
-                    size={Math.max(activePO.orderNumber.length, 1)}
-                    className={`${poField} max-w-full font-mono font-bold text-sm text-[#BA1B2D] text-left p-0`}
-                    aria-label="발주번호"
-                  />
-                  <label className="mt-1 grid grid-cols-[5.5rem_7.5rem] items-center">
-                    <span className="text-slate-600">발주일자:</span>
-                    <input
-                      value={activePO.orderDate}
-                      onChange={(e) => updatePO({ orderDate: e.target.value })}
-                      className={`${poField} text-left text-slate-600 p-0`}
-                      aria-label="발주일자"
-                    />
-                  </label>
-                  <label className="grid grid-cols-[5.5rem_7.5rem] items-center">
-                    <span className="font-semibold text-rose-600">납기요청일:</span>
-                    <input
-                      value={activePO.deliveryDueDate}
-                      onChange={(e) => updatePO({ deliveryDueDate: e.target.value })}
-                      className={`${poField} text-left font-semibold text-rose-600 p-0`}
-                      aria-label="납기요청일"
-                    />
-                  </label>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b-2 border-slate-900 pb-4">
+                <div>
+                  <h1 className="text-2xl sm:text-3xl font-black tracking-widest text-slate-900">
+                    자 재 발 주 서
+                  </h1>
+                </div>
+                <div className="mt-2 sm:mt-0 text-right text-xs">
+                  <p className="font-mono font-bold text-sm text-[#BA1B2D]">{activePO.orderNumber}</p>
+                  <p className="text-slate-600">발주일자: {activePO.orderDate}</p>
+                  <p className="text-rose-600 font-semibold">납기요청일: {activePO.deliveryDueDate}</p>
                 </div>
               </div>
 
               {/* Vendor & Buyer Information Grid */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 print:grid-cols-2 gap-4 text-xs border border-slate-300 p-3 rounded-lg bg-slate-50/50">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs border border-slate-300 p-3 rounded-lg bg-slate-50/50">
                 {/* Buyer Info */}
-                <div className="space-y-1 pr-2 min-w-0">
+                <div className="space-y-1 pr-2">
                   <p className="font-bold text-[#BA1B2D] border-b border-slate-200 pb-1">발주자</p>
-                  <label className="flex items-center gap-1 min-w-0"><span className="text-slate-500 shrink-0">상호명:</span> <input value={activePO.buyerName} onChange={(e) => updatePO({ buyerName: e.target.value })} className={`${poField} min-w-0 flex-1 font-bold`} /></label>
-                  <label className="flex items-center gap-1 min-w-0"><span className="text-slate-500 shrink-0">사업자등록번호:</span> <input value={activePO.buyerBizNo} onChange={(e) => updatePO({ buyerBizNo: e.target.value })} className={`${poField} min-w-0 flex-1`} /></label>
-                  <label className="flex items-start gap-1 min-w-0">
-                    <span className="text-slate-500 shrink-0 pt-0.5">납품장소:</span>
-                    <textarea
-                      rows={2}
-                      value={activePO.deliveryPlace}
-                      onChange={(e) => updatePO({ deliveryPlace: e.target.value })}
-                      className={`${poField} min-w-0 flex-1 w-full leading-snug whitespace-pre-wrap print:resize-none`}
-                      aria-label="납품장소"
-                    />
-                  </label>
-                  <label className="flex items-center gap-1 min-w-0"><span className="text-slate-500 shrink-0">발주담당:</span> <input value={activePO.buyerContact} onChange={(e) => updatePO({ buyerContact: e.target.value })} className={`${poField} min-w-0 flex-1`} /></label>
+                  <p><span className="text-slate-500">상호명:</span> <strong>주식회사 루씨엠</strong></p>
+                  <p><span className="text-slate-500">사업자등록번호:</span> 119-86-59000</p>
+                  <p><span className="text-slate-500">납품장소:</span> 루씨엠 중앙제조센터 제1생산공장</p>
+                  <p><span className="text-slate-500">발주담당:</span> 자재구매팀 선임매니저 (02-851-7100)</p>
                 </div>
 
                 {/* Supplier Info */}
-                <div className="space-y-1 sm:pl-2 sm:border-l print:pl-2 print:border-l border-t sm:border-t-0 print:border-t-0 border-slate-200 pt-2 sm:pt-0 print:pt-0 min-w-0">
+                <div className="space-y-1 pl-2 border-t md:border-t-0 md:border-l border-slate-200 pt-2 md:pt-0">
                   <p className="font-bold text-slate-800 border-b border-slate-200 pb-1">공급자</p>
-                  <label className="flex items-center gap-1 min-w-0"><span className="text-slate-500 shrink-0">상호명:</span> <input value={activePO.supplier} onChange={(e) => updatePO({ supplier: e.target.value })} className={`${poField} min-w-0 flex-1 font-bold`} /></label>
-                  <label className="flex items-center gap-1 min-w-0"><span className="text-slate-500 shrink-0">담당자:</span> <input value={activePO.contactPerson} onChange={(e) => updatePO({ contactPerson: e.target.value })} className={`${poField} min-w-0 flex-1`} /></label>
-                  <label className="flex items-center gap-1 min-w-0"><span className="text-slate-500 shrink-0">연락처:</span> <input value={activePO.phone} onChange={(e) => updatePO({ phone: e.target.value })} className={`${poField} min-w-0 flex-1`} /></label>
-                  <label className="flex items-center gap-1 min-w-0"><span className="text-slate-500 shrink-0">결제조건:</span> <input value={activePO.paymentTerms} onChange={(e) => updatePO({ paymentTerms: e.target.value })} className={`${poField} min-w-0 flex-1`} /></label>
+                  <p><span className="text-slate-500">상호명:</span> <strong>{activePO.supplier}</strong></p>
+                  <p><span className="text-slate-500">담당자:</span> {activePO.contactPerson}</p>
+                  <p><span className="text-slate-500">연락처:</span> {activePO.phone}</p>
+                  <p><span className="text-slate-500">결제조건:</span> 마감 익월 30일 현금 또는 계좌이체</p>
                 </div>
               </div>
 
               {/* Items Table */}
-              <div className="min-w-0">
-                <table className="w-full table-fixed text-xs text-left border border-slate-300">
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs text-left border border-slate-300">
                   <thead className="bg-slate-100 font-bold border-b border-slate-300 text-slate-800">
                     <tr>
-                      <th className="p-2 w-[8%] text-center">순번</th>
-                      <th className="p-2 w-[34%]">품목명 및 규격</th>
-                      <th className="p-2 w-[10%] text-center">단위</th>
-                      <th className="p-2 w-[14%] text-right">발주수량</th>
-                      <th className="p-2 w-[16%] text-right">단가(원)</th>
-                      <th className="p-2 w-[18%] text-right">공급가액(원)</th>
+                      <th className="p-2 w-10 text-center">순번</th>
+                      <th className="p-2">품목명 및 규격</th>
+                      <th className="p-2 text-center">단위</th>
+                      <th className="p-2 text-right">발주수량</th>
+                      <th className="p-2 text-right">단가(원)</th>
+                      <th className="p-2 text-right">공급가액(원)</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200">
                     {activePO.items.map((item, idx) => (
                       <tr key={idx}>
-                        <td className="p-2 text-center text-slate-500">
-                          {idx + 1}
-                          <button
-                            type="button"
-                            onClick={() => removeItem(idx)}
-                            className="block mx-auto mt-1 text-[10px] text-rose-600 hover:underline print:hidden"
-                          >
-                            삭제
-                          </button>
+                        <td className="p-2 text-center text-slate-500">{idx + 1}</td>
+                        <td className="p-2">
+                          <span className="font-bold block">{item.name}</span>
+                          <span className="text-[11px] text-slate-500">{item.spec}</span>
                         </td>
-                        <td className="p-2 min-w-0">
-                          <input value={item.name} onChange={(e) => updateItem(idx, { name: e.target.value })} className={`${poField} w-full min-w-0 font-bold`} aria-label={`품목명 ${idx + 1}`} />
-                          <input value={item.spec} onChange={(e) => updateItem(idx, { spec: e.target.value })} className={`${poField} w-full min-w-0 text-[11px] text-slate-500`} aria-label={`상세 규격 ${idx + 1}`} />
+                        <td className="p-2 text-center font-medium">{item.unit}</td>
+                        <td className="p-2 text-right font-mono font-bold text-slate-900">
+                          {item.orderQty.toLocaleString()}
                         </td>
-                        <td className="p-2 text-center font-medium min-w-0">
-                          <input value={item.unit} onChange={(e) => updateItem(idx, { unit: e.target.value })} className={`${poField} w-full min-w-0 text-center`} aria-label={`단위 ${idx + 1}`} />
-                        </td>
-                        <td className="p-2 text-right font-mono font-bold text-slate-900 min-w-0">
-                          <input value={item.orderQty} onChange={(e) => updateItem(idx, { orderQty: Number(e.target.value) })} className={`${poField} w-full min-w-0 text-right font-mono font-bold`} aria-label={`발주수량 ${idx + 1}`} />
-                        </td>
-                        <td className="p-2 text-right font-mono min-w-0">
-                          <input value={item.unitPrice} onChange={(e) => updateItem(idx, { unitPrice: Number(e.target.value) })} className={`${poField} w-full min-w-0 text-right font-mono`} aria-label={`단가 ${idx + 1}`} />
+                        <td className="p-2 text-right font-mono">
+                          {item.unitPrice.toLocaleString()}
                         </td>
                         <td className="p-2 text-right font-mono font-bold">
                           {item.totalPrice.toLocaleString()}
@@ -875,49 +689,21 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
                     </tr>
                   </tfoot>
                 </table>
-                <button
-                  type="button"
-                  onClick={addItem}
-                  className="mt-2 text-xs font-semibold text-[#BA1B2D] hover:underline print:hidden"
-                >
-                  품목 추가
-                </button>
-                <div className="mt-3 grid grid-cols-[4.5rem_1fr] items-start gap-2">
-                  <span className="pt-1 text-xs font-bold text-slate-700">비고</span>
-                  <textarea
-                    value={activePO.remarks}
-                    onChange={(e) => updatePO({ remarks: e.target.value })}
-                    rows={2}
-                    placeholder="양식에 없는 내용을 적어 주세요."
-                    className={`${poField} w-full min-w-0 resize-none print:resize-none text-xs leading-5`}
-                    aria-label="비고"
-                  />
-                </div>
               </div>
 
               {/* Terms & Official Stamp */}
               <div className="flex flex-col sm:flex-row items-center justify-between gap-4 text-[11px] text-slate-600 pt-4 border-t border-slate-200">
-                <div className="space-y-1 flex-1 min-w-0">
-                  {activePO.terms.map((term, index) => (
-                    <input
-                      key={index}
-                      value={term.replace(/\s*\n\s*/g, ' ')}
-                      onChange={(e) => {
-                        const terms = [...activePO.terms];
-                        terms[index] = e.target.value.replace(/\n/g, ' ');
-                        updatePO({ terms });
-                      }}
-                      className={`${poField} block w-full min-w-0 whitespace-nowrap text-[10px] print:text-[9px] leading-5`}
-                      aria-label={`납품 조건 ${index + 1}`}
-                    />
-                  ))}
+                <div className="space-y-1">
+                  <p>1. 모든 납품 자재는 본사 사전 승인된 규격서 및 시험성적서를 만족해야 합니다.</p>
+                  <p>2. 납기 지연 시 일 지체상금률(0.15%)이 적용될 수 있습니다.</p>
+                  <p>3. 물품 인수 검수 시 불량품 발생 시 즉시 무상 교환을 원칙으로 합니다.</p>
                 </div>
 
-                <div className="border border-slate-400 p-3 rounded-md text-center min-w-[140px] shrink-0 bg-slate-50">
-                  <input value={activePO.stampLabel} onChange={(e) => updatePO({ stampLabel: e.target.value })} className={`${poField} text-[10px] text-slate-500 text-center`} aria-label="확인인 제목" />
-                  <input value={activePO.stampOrg} onChange={(e) => updatePO({ stampOrg: e.target.value })} className={`${poField} text-xs font-bold text-slate-900 text-center mt-1`} aria-label="확인인 상호" />
-                  <div className="w-10 h-10 border border-rose-400 rounded-full mx-auto my-1 flex items-center justify-center">
-                    <input value={activePO.stampMark} onChange={(e) => updatePO({ stampMark: e.target.value })} className={`${poField} text-[10px] text-rose-500 font-bold text-center w-9`} aria-label="확인 표시" />
+                <div className="border border-slate-400 p-3 rounded-md text-center min-w-[140px] bg-slate-50">
+                  <span className="text-[10px] text-slate-500 block">발주처 확인인</span>
+                  <span className="text-xs font-bold text-slate-900 block mt-1">주식회사 루씨엠</span>
+                  <div className="w-10 h-10 border border-rose-400 rounded-full mx-auto my-1 flex items-center justify-center text-[10px] text-rose-500 font-bold">
+                    직인생략
                   </div>
                 </div>
               </div>

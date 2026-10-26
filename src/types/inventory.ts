@@ -1,4 +1,4 @@
-export type ProductCategory = 'outdoor' | 'indoor' | 'indoorGeneral' | 'mobile' | 'lsend';
+export type ProductCategory = 'outdoor' | 'indoor' | 'mobile' | 'lsend';
 
 export interface ProductInfo {
   id: ProductCategory;
@@ -31,7 +31,6 @@ export interface MaterialItem {
   usedIn: {
     outdoor: number;
     indoor: number;
-    indoorGeneral: number;
     mobile: number;
     lsend: number;
   };
@@ -69,26 +68,6 @@ export interface PurchaseOrderItem {
   safetyStock: number;
   supplier: string;
   reason: string;
-}
-
-export interface AssemblyLine {
-  materialId: number;
-  name: string;
-  unit: string;
-  perUnit: number;
-  deductQty: number;
-  stockBefore: number;
-  stockAfter: number;
-}
-
-export interface AssemblyRecord {
-  id: string;
-  createdAt: string;
-  product: Exclude<ProductCategory, never>;
-  productName: string;
-  quantity: number;
-  lines: AssemblyLine[];
-  reversedAt?: string;
 }
 
 export interface PurchaseOrder {

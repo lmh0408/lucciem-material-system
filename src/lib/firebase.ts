@@ -14,7 +14,7 @@ import {
 } from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
-import { AssemblyRecord, MaterialItem, SupplierInfo } from '../types/inventory';
+import { MaterialItem, SupplierInfo } from '../types/inventory';
 
 // Firebase 앱 초기화 (중복 초기화 방지)
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
@@ -51,7 +51,6 @@ function sanitizeForFirestore<T extends Record<string, any>>(obj: T): T {
 
 export const MATERIALS_COLLECTION = 'materials';
 export const SUPPLIERS_COLLECTION = 'suppliers';
-export const ASSEMBLIES_COLLECTION = 'assemblies';
 
 /**
  * Firestore에서 자재 목록 전체 가져오기
@@ -157,19 +156,5 @@ export async function seedSuppliersToDb(suppliers: SupplierInfo[]): Promise<void
     batch.set(docRef, payload, { merge: true });
   }
   await batch.commit();
-}
-
-export async function getAssemblyRecords(): Promise<AssemblyRecord[]> {
-  const snapshot = await getDocs(collection(db, ASSEMBLIES_COLLECTION));
-  const items: AssemblyRecord[] = [];
-  snapshot.forEach((docSnap) => {
-    items.push(docSnap.data() as AssemblyRecord);
-  });
-  return items.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-}
-
-export async function saveAssemblyRecord(record: AssemblyRecord): Promise<void> {
-  const docRef = doc(db, ASSEMBLIES_COLLECTION, record.id);
-  await setDoc(docRef, sanitizeForFirestore(record));
 }
 
