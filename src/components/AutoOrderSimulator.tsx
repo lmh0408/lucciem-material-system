@@ -5,6 +5,7 @@ import {
   CheckCircle,
   Search,
   Package,
+  Trash2,
 } from 'lucide-react';
 import { RAW_MATERIALS_DATA } from '../data/materialsData';
 import { MaterialItem } from '../types/inventory';
@@ -12,13 +13,17 @@ import { MaterialItem } from '../types/inventory';
 interface AutoOrderSimulatorProps {
   materials?: MaterialItem[];
   onEditMaterial?: (item: MaterialItem) => void;
+  onDeleteMaterial?: (id: number) => void;
 }
 
 export const AutoOrderSimulator: React.FC<AutoOrderSimulatorProps> = ({
   materials = RAW_MATERIALS_DATA,
   onEditMaterial,
+  onDeleteMaterial,
 }) => {
   const [filterStatus, setFilterStatus] = useState<string>('ALL');
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
   const [selectedModel, setSelectedModel] = useState<'ALL' | 'outdoor' | 'indoor' | 'mobile' | 'lsend'>('ALL');
   const [searchTerm, setSearchTerm] = useState('');
   const [commonFilter, setCommonFilter] = useState<string>('ALL');
@@ -100,6 +105,37 @@ export const AutoOrderSimulator: React.FC<AutoOrderSimulatorProps> = ({
       return matchesStatus && matchesSearch && matchesCommon;
     });
   }, [evaluatedMaterials, filterStatus, searchTerm, commonFilter]);
+
+  const allDisplayedSelected =
+    displayedList.length > 0 && displayedList.every((item) => selectedIds.has(item.id));
+
+  const toggleSelectAllDisplayed = () => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allDisplayedSelected) {
+        displayedList.forEach((item) => next.delete(item.id));
+      } else {
+        displayedList.forEach((item) => next.add(item.id));
+      }
+      return next;
+    });
+  };
+
+  const toggleSelectRow = (id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleConfirmBulkDelete = () => {
+    if (!onDeleteMaterial) return;
+    selectedIds.forEach((id) => onDeleteMaterial(id));
+    setSelectedIds(new Set());
+    setConfirmBulkDelete(false);
+  };
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto py-4">
@@ -319,10 +355,31 @@ export const AutoOrderSimulator: React.FC<AutoOrderSimulatorProps> = ({
           </div>
         </div>
 
+        <div className="px-4 py-2 border-b border-slate-100 flex justify-end bg-white">
+          <button
+            type="button"
+            disabled={selectedIds.size === 0 || !onDeleteMaterial}
+            onClick={() => setConfirmBulkDelete(true)}
+            className="inline-flex items-center gap-1.5 rounded-xl border px-3.5 py-2 text-xs font-bold transition-colors disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 enabled:border-rose-200 enabled:bg-rose-50 enabled:text-[#BA1B2D] enabled:hover:bg-rose-100"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            내역 삭제
+          </button>
+        </div>
+
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
             <thead className="bg-slate-50 text-slate-700 font-semibold border-b border-slate-200">
               <tr>
+                <th className="py-2.5 px-2.5 w-10 text-center">
+                  <input
+                    type="checkbox"
+                    checked={allDisplayedSelected}
+                    onChange={toggleSelectAllDisplayed}
+                    aria-label="현재 목록 전체 선택"
+                    className="h-4 w-4 rounded border-slate-300 text-[#BA1B2D] focus:ring-[#BA1B2D]"
+                  />
+                </th>
                 <th className="py-2.5 px-2.5 w-12 text-center">No</th>
                 <th className="py-2.5 px-3 min-w-[130px]">품목명</th>
                 <th className="py-2.5 px-3 min-w-[140px]">규격</th>
@@ -355,7 +412,7 @@ export const AutoOrderSimulator: React.FC<AutoOrderSimulatorProps> = ({
             <tbody className="divide-y divide-slate-100">
               {displayedList.length === 0 ? (
                 <tr>
-                  <td colSpan={13} className="text-center py-8 text-slate-400">
+                  <td colSpan={14} className="text-center py-8 text-slate-400">
                     조건과 일치하는 자재가 없습니다.
                   </td>
                 </tr>
@@ -373,6 +430,15 @@ export const AutoOrderSimulator: React.FC<AutoOrderSimulatorProps> = ({
                       }`}
                       title={onEditMaterial ? "더블 클릭하여 자재 사양 및 재고 수정" : undefined}
                     >
+                      <td className="py-2.5 px-2.5 text-center" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(item.id)}
+                          onChange={() => toggleSelectRow(item.id)}
+                          aria-label={`${item.name} 선택`}
+                          className="h-4 w-4 rounded border-slate-300 text-[#BA1B2D] focus:ring-[#BA1B2D]"
+                        />
+                      </td>
                       {/* [A열] No */}
                       <td className="py-2.5 px-2.5 text-center font-mono text-slate-400">
                         {idx + 1}
@@ -533,6 +599,33 @@ export const AutoOrderSimulator: React.FC<AutoOrderSimulatorProps> = ({
           </table>
         </div>
       </div>
+
+      {confirmBulkDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
+            <h3 className="text-base font-bold text-slate-900">선택 항목 삭제</h3>
+            <p className="mt-2 text-xs text-slate-600">
+              선택한 {selectedIds.size}건의 자재를 원장에서 삭제합니다. 계속하시겠습니까?
+            </p>
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmBulkDelete(false)}
+                className="rounded-xl px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100"
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmBulkDelete}
+                className="rounded-xl bg-[#BA1B2D] px-4 py-2 text-xs font-bold text-white hover:bg-[#a01625]"
+              >
+                삭제
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

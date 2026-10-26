@@ -1,67 +1,70 @@
 import React from 'react';
+import { createPortal } from 'react-dom';
+import { GOOGLE_APPS_SCRIPT_CODE } from '../data/googleAppsScriptCode';
 import { 
   Layers, 
   RefreshCw, 
   Building2, 
   Package,
-  Database,
-  CheckCircle2,
-  AlertCircle,
-  Loader2,
   Save,
   FileSpreadsheet,
   ExternalLink,
-  ChevronDown
+  Download,
+  Settings,
+  X,
+  Copy,
+  Check,
 } from 'lucide-react';
 
-export type TabType = 'materials' | 'matrix' | 'simulator' | 'suppliers';
-
+export type TabType = 'materials' | 'simulator' | 'suppliers';
 export type DbStatus = 'connected' | 'loading' | 'syncing' | 'error';
+
+/** 화면 표시 버전 v1.0 */
+const DISPLAYED_APP_VERSION = 'v1.0';
 
 interface NavbarProps {
   activeTab: TabType;
   setActiveTab: (tab: TabType) => void;
-  dbStatus: DbStatus;
-  dbMessage: string;
-  totalMaterialsCount: number;
-  onRefreshFromDb: () => void;
   onReseedDb: () => void;
   onSyncFromGoogleSheet?: () => void;
   googleSheetUrl?: string;
+  googleScriptUrl?: string;
+  onGoogleSheetSettingsChange?: (settings: { googleSheetUrl: string; googleScriptUrl: string }) => void;
   isSaving?: boolean;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
   activeTab,
   setActiveTab,
-  dbStatus,
-  dbMessage,
-  totalMaterialsCount,
-  onRefreshFromDb,
   onReseedDb,
   onSyncFromGoogleSheet,
   googleSheetUrl = 'https://docs.google.com/spreadsheets/d/1cqYtwVvxJU9UmQ0oHJYMFupGZDae5sN1bh3Grvrt7Xs/edit?usp=sharing',
+  googleScriptUrl = '',
+  onGoogleSheetSettingsChange,
   isSaving = false,
 }) => {
-  const [isLoadMenuOpen, setIsLoadMenuOpen] = React.useState(false);
-  const loadMenuRef = React.useRef<HTMLDivElement>(null);
+  const [isSettingsOpen, setIsSettingsOpen] = React.useState(false);
+  const [isAppsScriptCopied, setIsAppsScriptCopied] = React.useState(false);
+  const [editingGoogleSheetUrl, setEditingGoogleSheetUrl] = React.useState(googleSheetUrl);
+  const [editingGoogleScriptUrl, setEditingGoogleScriptUrl] = React.useState(googleScriptUrl);
 
-  // 메뉴 바깥 클릭 시 닫기
-  React.useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (loadMenuRef.current && !loadMenuRef.current.contains(e.target as Node)) {
-        setIsLoadMenuOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
+  React.useEffect(() => setEditingGoogleSheetUrl(googleSheetUrl), [googleSheetUrl]);
+  React.useEffect(() => setEditingGoogleScriptUrl(googleScriptUrl), [googleScriptUrl]);
+
+  const copyAppsScriptCode = async () => {
+    try {
+      await navigator.clipboard.writeText(GOOGLE_APPS_SCRIPT_CODE);
+      setIsAppsScriptCopied(true);
+      window.setTimeout(() => setIsAppsScriptCopied(false), 2000);
+    } catch {
+      window.alert('클립보드 접근이 차단되었습니다. 브라우저 권한을 허용한 뒤 다시 시도해 주세요.');
+    }
+  };
 
   const tabs = [
     { id: 'simulator' as TabType, label: '재고 현황', icon: RefreshCw, desc: '안전재고 및 발주 수량 산출' },
     { id: 'materials' as TabType, label: '자재 DB', icon: Package, desc: '자재 등록, 사양 수정 및 관리' },
     { id: 'suppliers' as TabType, label: '협력사 및 발주', icon: Building2, desc: '거래처 등록 및 발주서 발행' },
-    { id: 'matrix' as TabType, label: '동일 자재 통합 관리', icon: Layers, desc: '품명 불일치 대조 및 표준화' },
   ];
 
   return (
@@ -75,73 +78,27 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <span className="font-bold text-slate-900 text-lg tracking-tight">루씨엠</span>
-                <span className="text-xs px-2 py-0.5 rounded-md bg-rose-50 text-[#BA1B2D] font-semibold border border-rose-200">
-                  통합 자재 관리 시스템
-                </span>
+                <span className="font-bold text-slate-900 text-lg tracking-tight">통합 자재 관리 시스템</span>
+                <span className="text-xs font-semibold text-slate-500">{DISPLAYED_APP_VERSION}</span>
               </div>
             </div>
           </div>
 
-          {/* Firebase DB 연동 상태 및 조작 버튼 (저장, 불러오기, 시트 보기) */}
           <div className="flex items-center gap-2 sm:gap-2.5">
-            <div 
-              id="firebase-db-status-badge"
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
-                dbStatus === 'connected'
-                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                  : dbStatus === 'syncing' || dbStatus === 'loading'
-                  ? 'bg-amber-50 text-amber-800 border-amber-200'
-                  : 'bg-rose-50 text-rose-800 border-rose-200'
-              }`}
-              title="Firebase Firestore 실시간 데이터베이스 연동 중"
-            >
-              {dbStatus === 'connected' && (
-                <>
-                  <span className="relative flex h-2 w-2">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                  </span>
-                  <Database className="w-3.5 h-3.5 text-emerald-600" />
-                  <span className="font-semibold text-emerald-900 hidden md:inline">Firebase DB 연동</span>
-                  <span className="text-emerald-700 bg-emerald-100/80 px-1.5 py-0.5 rounded text-[11px] font-bold">
-                    {totalMaterialsCount}개 품목
-                  </span>
-                </>
-              )}
-
-              {(dbStatus === 'loading' || dbStatus === 'syncing') && (
-                <>
-                  <Loader2 className="w-3.5 h-3.5 text-amber-600 animate-spin" />
-                  <span className="font-medium">
-                    {dbStatus === 'loading' ? 'DB 조회 중...' : 'DB 저장 중...'}
-                  </span>
-                </>
-              )}
-
-              {dbStatus === 'error' && (
-                <>
-                  <AlertCircle className="w-3.5 h-3.5 text-rose-600" />
-                  <span className="font-medium">DB 연결 오류</span>
-                </>
-              )}
-            </div>
-
-            {/* 1. 저장 버튼 (저장 중 애니메이션 및 눌림 표시) */}
             <button
-              id="btn-save-firebase-db"
+              id="btn-save-materials"
               onClick={onReseedDb}
-              disabled={isSaving || dbStatus === 'loading' || dbStatus === 'syncing'}
+              disabled={isSaving}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer shadow-xs active:scale-95 ${
-                isSaving || dbStatus === 'syncing'
+                isSaving
                   ? 'bg-[#BA1B2D] text-white border border-red-700 ring-4 ring-rose-400/50 scale-95 shadow-inner cursor-wait animate-pulse'
                   : 'text-[#BA1B2D] bg-rose-50 border border-rose-200 hover:bg-rose-100 hover:shadow-xs'
               }`}
-              title="현재 자재 데이터를 Firebase DB 및 원장 구글 시트에 일괄 저장"
+              title="현재 앱 자재 데이터를 원장 자재관리DB에 저장합니다"
             >
-              {isSaving || dbStatus === 'syncing' ? (
+              {isSaving ? (
                 <>
-                  <Loader2 className="w-3.5 h-3.5 animate-spin text-white" />
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-white" />
                   <span className="font-bold text-white">저장 중...</span>
                 </>
               ) : (
@@ -152,68 +109,49 @@ export const Navbar: React.FC<NavbarProps> = ({
               )}
             </button>
 
-            {/* 2. 불러오기 버튼 (드롭다운 메뉴 포함) */}
-            <div className="relative" ref={loadMenuRef}>
-              <button
-                id="btn-load-firebase-db"
-                onClick={() => setIsLoadMenuOpen(prev => !prev)}
-                disabled={dbStatus === 'loading' || dbStatus === 'syncing'}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 transition-colors cursor-pointer"
-                title="데이터 불러오기 (Firebase DB 또는 원장 구글 시트)"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${dbStatus === 'loading' ? 'animate-spin' : ''}`} />
-                <span>불러오기</span>
-                <ChevronDown className={`w-3 h-3 text-slate-400 transition-transform ${isLoadMenuOpen ? 'rotate-180' : ''}`} />
-              </button>
+            <button
+              id="btn-load-google-sheet"
+              onClick={onSyncFromGoogleSheet}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 transition-colors cursor-pointer"
+              title="원장 자재관리DB에서 앱으로 자재 데이터를 불러옵니다"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>불러오기</span>
+            </button>
 
-              {isLoadMenuOpen && (
-                <div className="absolute right-0 mt-1 w-60 bg-white border border-slate-200 rounded-xl shadow-xl z-50 p-1.5 text-xs animate-in fade-in zoom-in-95">
-                  <button
-                    onClick={() => {
-                      setIsLoadMenuOpen(false);
-                      onRefreshFromDb();
-                    }}
-                    className="w-full flex items-start gap-2.5 px-3 py-2.5 rounded-lg hover:bg-slate-50 text-left text-slate-800 transition-colors cursor-pointer"
-                  >
-                    <Database className="w-4 h-4 text-emerald-600 mt-0.5 shrink-0" />
-                    <div>
-                      <div className="font-bold text-slate-900">Firebase DB에서 불러오기</div>
-                      <div className="text-[11px] text-slate-500">클라우드 DB에 저장된 자재/재고 다시 로드</div>
-                    </div>
-                  </button>
-
-                  {onSyncFromGoogleSheet && (
-                    <button
-                      onClick={() => {
-                        setIsLoadMenuOpen(false);
-                        onSyncFromGoogleSheet();
-                      }}
-                      className="w-full flex items-start gap-2.5 px-3 py-2.5 rounded-lg hover:bg-emerald-50 text-left text-slate-800 transition-colors cursor-pointer border-t border-slate-100 mt-1"
-                    >
-                      <FileSpreadsheet className="w-4 h-4 text-emerald-600 mt-0.5 shrink-0" />
-                      <div>
-                        <div className="font-bold text-emerald-950">원장 구글 시트에서 가져오기</div>
-                        <div className="text-[11px] text-emerald-700">4대 탭(옥외,실내,이동,L.SEND) 실시간 동기화</div>
-                      </div>
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* 3. 시트 보기 버튼 */}
             <a
               id="btn-view-google-sheet"
               href={googleSheetUrl}
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 transition-colors cursor-pointer"
-              title="원장 구글 시트를 새 탭에서 열기"
+              title="원장 구글 시트를 새 탭에서 엽니다"
             >
               <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
-              <span>시트 보기</span>
+              <span>시트 열기</span>
               <ExternalLink className="w-3 h-3 text-emerald-600 opacity-70" />
             </a>
+
+            <a
+              id="btn-download-source"
+              href="/api/download-source"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 transition-colors cursor-pointer"
+              title="서버에 배포된 현재 프로젝트 소스를 내려받습니다"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>소스 받기</span>
+            </a>
+
+            <button
+              type="button"
+              id="btn-settings"
+              onClick={() => setIsSettingsOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 transition-colors cursor-pointer"
+              title="구글 시트 및 동기화 설정"
+            >
+              <Settings className="w-3.5 h-3.5" />
+              <span>설정</span>
+            </button>
           </div>
         </div>
 
@@ -239,6 +177,74 @@ export const Navbar: React.FC<NavbarProps> = ({
           })}
         </nav>
       </div>
+
+      {isSettingsOpen && createPortal(
+        <div className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-slate-900/50 p-6">
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              onGoogleSheetSettingsChange?.({
+                googleSheetUrl: editingGoogleSheetUrl.trim(),
+                googleScriptUrl: editingGoogleScriptUrl.trim(),
+              });
+              setIsSettingsOpen(false);
+            }}
+            className="relative my-auto w-full max-w-[720px] rounded-2xl border border-slate-200 bg-white px-10 py-9 shadow-xl"
+          >
+            <button
+              type="button"
+              onClick={() => setIsSettingsOpen(false)}
+              className="absolute right-5 top-5 rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+              aria-label="설정 닫기"
+            >
+              <X className="h-5 w-5" />
+            </button>
+            <section className="pr-8">
+              <h2 className="text-lg font-bold tracking-tight text-slate-900">1. 시트 연결</h2>
+              <label className="mt-6 block text-sm font-bold text-slate-700">
+                구글 스프레드시트 URL
+                <input
+                  value={editingGoogleSheetUrl}
+                  onChange={(event) => setEditingGoogleSheetUrl(event.target.value)}
+                  required
+                  type="url"
+                  className="mt-3 w-full rounded-full border border-slate-200 bg-slate-50 px-5 py-3.5 font-mono text-sm font-normal tracking-wide text-slate-700 outline-none focus:border-[#BA1B2D] focus:ring-2 focus:ring-rose-100"
+                />
+              </label>
+            </section>
+            <section className="mt-8 border-t border-slate-200 pt-8 pr-8">
+              <h2 className="text-lg font-bold tracking-tight text-slate-900">2. 저장 연결</h2>
+              <button
+                type="button"
+                onClick={copyAppsScriptCode}
+                className="mt-5 inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-bold text-white hover:bg-slate-700"
+              >
+                {isAppsScriptCopied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                {isAppsScriptCopied ? '코드 복사 완료' : 'Apps Script 코드 복사'}
+              </button>
+              <label className="mt-6 block text-sm font-bold text-slate-700">
+                저장용 웹앱 URL
+                <input
+                  value={editingGoogleScriptUrl}
+                  onChange={(event) => setEditingGoogleScriptUrl(event.target.value)}
+                  required
+                  type="url"
+                  className="mt-3 w-full rounded-full border border-slate-200 bg-slate-50 px-5 py-3.5 font-mono text-sm font-normal tracking-wide text-slate-700 outline-none focus:border-[#BA1B2D] focus:ring-2 focus:ring-rose-100"
+                />
+              </label>
+            </section>
+            <div className="mt-8 flex justify-end gap-2 pr-8">
+              <button type="button" onClick={() => setIsSettingsOpen(false)} className="rounded-lg px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100">
+                취소
+              </button>
+              <button type="submit" className="rounded-lg bg-[#BA1B2D] px-4 py-2 text-sm font-bold text-white hover:bg-[#a01625]">
+                저장
+              </button>
+            </div>
+          </form>
+        </div>,
+        document.body,
+      )}
     </header>
   );
 };

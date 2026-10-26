@@ -13,6 +13,7 @@ export type CommonalityLevel = 'C4' | 'C3' | 'C2' | 'DEDICATED';
 export type MainCategory = 'EL' | 'SW' | 'CB' | 'OP' | 'ME' | 'CA';
 
 export interface MaterialItem {
+  recordUuid?: string;
   id: number;
   originalNo: number;
   standardCode?: string;
@@ -46,6 +47,7 @@ export interface MaterialItem {
 }
 
 export interface SupplierInfo {
+  recordUuid?: string;
   id: string;
   name: string;
   contactPerson: string;
@@ -71,12 +73,22 @@ export interface PurchaseOrderItem {
 }
 
 export interface PurchaseOrder {
+  documentTitle: string;
   orderNumber: string;
   orderDate: string;
   supplier: string;
   contactPerson: string;
   phone: string;
   deliveryDueDate: string;
+  buyerName: string;
+  buyerBusinessNumber: string;
+  deliveryPlace: string;
+  buyerContact: string;
+  paymentTerms: string;
+  terms: string[];
+  confirmLabel: string;
+  confirmCompany: string;
+  confirmNote: string;
   items: PurchaseOrderItem[];
   totalAmount: number;
   vatAmount: number;

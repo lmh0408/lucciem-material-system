@@ -1,41 +1,76 @@
 @import "tailwindcss";
 
+#po-print-root {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 794px;
+  height: 0;
+  overflow: hidden;
+  background: #ffffff;
+}
+
 @media print {
-  body {
-    background-color: #ffffff !important;
-    color: #0f172a !important;
+  @page {
+    size: A4 portrait;
+    margin: 8mm;
+  }
+
+  body.po-print-mode {
+    background: #ffffff !important;
+    margin: 0 !important;
+    padding: 0 !important;
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
   }
 
-  nav,
-  footer,
-  .print\:hidden {
+  body.po-print-mode > *:not(#po-print-root) {
     display: none !important;
   }
 
-  main {
-    max-width: 100% !important;
-    padding: 0 !important;
+  body.po-print-mode > #po-print-root {
+    display: block !important;
+    position: static !important;
+    left: auto !important;
+    top: auto !important;
+    width: auto !important;
+    height: auto !important;
+    overflow: visible !important;
     margin: 0 !important;
+    padding: 0 !important;
+    background: #ffffff !important;
   }
 
-  article {
-    max-width: 100% !important;
-    padding: 0 !important;
+  #po-print-root #purchase-order-document {
+    width: 194mm !important;
+    max-width: 194mm !important;
     margin: 0 !important;
-  }
-
-  section {
+    box-shadow: none !important;
     break-inside: avoid;
     page-break-inside: avoid;
-    box-shadow: none !important;
-    border-color: #cbd5e1 !important;
-    margin-bottom: 24px !important;
   }
 
-  @page {
-    size: A4 portrait;
-    margin: 15mm 15mm 15mm 15mm;
+  #po-print-root .po-head {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+  }
+
+  #po-print-root .po-party-grid {
+    display: grid !important;
+    grid-template-columns: 1fr 1fr !important;
+  }
+
+  #po-print-root .po-party-supplier {
+    border-top: 0 !important;
+    border-left: 1px solid #e2e8f0 !important;
+    padding-top: 0 !important;
+    padding-left: 0.5rem !important;
+  }
+
+  #po-print-root .print\:hidden,
+  #po-print-root .pdf-export-hidden {
+    display: none !important;
   }
 }

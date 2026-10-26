@@ -1,4 +1,5 @@
 import { MaterialItem } from '../types/inventory';
+import { UNIFIED_LEDGER_NAMES } from './divergentPartsData';
 
 export interface SheetRowDefinition {
   tab: '옥외보관함 자재리스트' | '실내보관함 자재리스트' | '이동형보관함 자재리스트' | 'L.SEND Case 자재리스트';
@@ -58,7 +59,7 @@ export const SHEET_ROW_DEFINITIONS: SheetRowDefinition[] = [
   { tab: '실내보관함 자재리스트', sheetName: 'MICRO S/W(탈착 스위치)', sheetSpec: 'V16-3FA-61', appMaterialId: 5 },
   { tab: '실내보관함 자재리스트', sheetName: 'Toggle S/W', sheetSpec: 'MTS-102', appMaterialId: 36 },
   { tab: '실내보관함 자재리스트', sheetName: 'PUSH BUTTON S/W', sheetSpec: 'QN16-F1-11/R', appMaterialId: 1 },
-  { tab: '실내보관함 자재리스트', sheetName: 'FPCB 안테나', sheetSpec: '300mm', appMaterialId: 65 },
+  { tab: '실내보관함 자재리스트', sheetName: UNIFIED_LEDGER_NAMES['CB-AT-0001-02'], sheetSpec: '300mm', appMaterialId: 65 },
   { tab: '실내보관함 자재리스트', sheetName: '하네스', sheetSpec: 'D (문열림)', appMaterialId: 37 },
   { tab: '실내보관함 자재리스트', sheetName: '하네스', sheetSpec: 'R (탈착)', appMaterialId: 38 },
   { tab: '실내보관함 자재리스트', sheetName: '하네스', sheetSpec: 'E (SOS)', appMaterialId: 39 },
@@ -84,7 +85,7 @@ export const SHEET_ROW_DEFINITIONS: SheetRowDefinition[] = [
   // ==========================================
   { tab: '이동형보관함 자재리스트', sheetName: '9V 배터리 홀더', sheetSpec: '1. ON/OFF 스위치\n2. 크기: (L)660X(W)320X(H)20mm\n3. 와이어 길이: 약.130mm\n4.검정색', appMaterialId: 6 },
   { tab: '이동형보관함 자재리스트', sheetName: '4 LED 스트로브 측면 경고등', sheetSpec: '1. RED & BLUE\n2. 12V~24v\n3. 평균 수명이 50,000시간\n4. 크기: (W)84 X(H)27X (D) 10mm\n5. Yellow : Change Mode', appMaterialId: 68 },
-  { tab: '이동형보관함 자재리스트', sheetName: 'FPCB 안테나', sheetSpec: '300mm', appMaterialId: 65 },
+  { tab: '이동형보관함 자재리스트', sheetName: UNIFIED_LEDGER_NAMES['CB-AT-0001-02'], sheetSpec: '300mm', appMaterialId: 65 },
   { tab: '이동형보관함 자재리스트', sheetName: 'RJ-45 터미널 블럭', sheetSpec: '8P', appMaterialId: 3 },
   { tab: '이동형보관함 자재리스트', sheetName: '펠리칸 CASE', sheetSpec: '', appMaterialId: 49 },
   { tab: '이동형보관함 자재리스트', sheetName: '폼', sheetSpec: '', appMaterialId: 50 },

@@ -3,10 +3,8 @@ import {
   Building2, 
   Phone, 
   User, 
-  Send, 
   Printer, 
   FileText, 
-  CheckCircle2, 
   AlertCircle, 
   DollarSign,
   FileDown,
@@ -18,24 +16,79 @@ import {
 } from 'lucide-react';
 import { SUPPLIERS_LIST, RAW_MATERIALS_DATA } from '../data/materialsData';
 import { SupplierInfo, PurchaseOrder, PurchaseOrderItem, MaterialItem } from '../types/inventory';
-import { downloadElementAsPDF } from '../utils/pdfExport';
-import { 
-  getSuppliersFromDb, 
-  saveSupplierToDb, 
-  deleteSupplierFromDb, 
-  seedSuppliersToDb 
-} from '../lib/firebase';
+import { downloadPurchaseOrderAsExcel } from '../utils/purchaseOrderExport';
+import { printPurchaseOrderDocument } from '../utils/purchaseOrderPrint';
+import {
+  fetchSuppliersFromLedger,
+  upsertSupplierInLedger,
+  deleteSupplierInLedger,
+} from '../utils/googleSheetLedger';
+import { getMaterialsBySupplier } from '../utils/supplierMatching';
 
 interface SupplierOrderManagerProps {
   materials?: MaterialItem[];
+  webAppUrl: string;
 }
 
 const SUPPLIERS_STORAGE_KEY = 'lucciem_suppliers_inventory_v2';
 
+const DEFAULT_PO_TERMS = [
+  '모든 납품 자재는 본사 사전 승인된 규격서 및 시험성적서를 만족해야 합니다.',
+  '납기 지연 시 일 지체상금률(0.15%)이 적용될 수 있습니다.',
+  '물품 인수 검수 시 불량품 발생 시 즉시 무상 교환을 원칙으로 합니다.',
+];
+
+const PoEditable: React.FC<{
+  editing: boolean;
+  value: string;
+  onStart: () => void;
+  onCommit: (next: string) => void;
+  onCancel: () => void;
+  className?: string;
+  inputClassName?: string;
+  numeric?: boolean;
+}> = ({ editing, value, onStart, onCommit, onCancel, className, inputClassName, numeric }) => {
+  const [draft, setDraft] = useState(value);
+
+  useEffect(() => {
+    if (editing) setDraft(value);
+  }, [editing, value]);
+
+  if (!editing) {
+    return (
+      <span onDoubleClick={onStart} title="더블클릭하여 편집" className={`cursor-text ${className ?? ''}`}>
+        {value || '\u00A0'}
+      </span>
+    );
+  }
+
+  return (
+    <input
+      autoFocus
+      type={numeric ? 'number' : 'text'}
+      min={numeric ? 0 : undefined}
+      value={draft}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={() => onCommit(draft)}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          onCancel();
+        } else if (event.key === 'Enter') {
+          event.preventDefault();
+          onCommit(draft);
+        }
+      }}
+      className={inputClassName}
+    />
+  );
+};
+
 export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
   materials = RAW_MATERIALS_DATA,
+  webAppUrl,
 }) => {
-  // Suppliers state with LocalStorage persistence & Firebase Firestore sync
+  // Suppliers state with LocalStorage cache + 구글 원장 협력사관리DB
   const [suppliers, setSuppliers] = useState<SupplierInfo[]>(() => {
     try {
       const saved = localStorage.getItem(SUPPLIERS_STORAGE_KEY);
@@ -51,27 +104,24 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
     return SUPPLIERS_LIST;
   });
 
-  // Load from Firebase DB on mount
   useEffect(() => {
     let isMounted = true;
-    const fetchSuppliers = async () => {
+    const loadSuppliers = async () => {
       try {
-        let dbList = await getSuppliersFromDb();
-        if (dbList.length === 0) {
-          await seedSuppliersToDb(SUPPLIERS_LIST);
-          dbList = await getSuppliersFromDb();
-        }
-        if (isMounted && dbList.length > 0) {
-          setSuppliers(dbList);
-          localStorage.setItem(SUPPLIERS_STORAGE_KEY, JSON.stringify(dbList));
+        const ledgerList = await fetchSuppliersFromLedger(webAppUrl);
+        if (isMounted && ledgerList.length > 0) {
+          setSuppliers(ledgerList);
+          localStorage.setItem(SUPPLIERS_STORAGE_KEY, JSON.stringify(ledgerList));
         }
       } catch (err) {
-        console.warn('Firebase suppliers fetch fallback:', err);
+        console.warn('원장 협력사 불러오기 실패, 로컬 캐시 유지:', err);
       }
     };
-    fetchSuppliers();
-    return () => { isMounted = false; };
-  }, []);
+    loadSuppliers();
+    return () => {
+      isMounted = false;
+    };
+  }, [webAppUrl]);
 
   useEffect(() => {
     try {
@@ -94,9 +144,16 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
   });
 
   const [selectedSupplier, setSelectedSupplier] = useState<SupplierInfo | null>(null);
+  const [selectedSupplierIds, setSelectedSupplierIds] = useState<Set<string>>(new Set());
+  const [confirmSupplierBulkDelete, setConfirmSupplierBulkDelete] = useState(false);
+  const [selectedPoLineIndexes, setSelectedPoLineIndexes] = useState<Set<number>>(new Set());
   const [activePO, setActivePO] = useState<PurchaseOrder | null>(null);
-  const [sentSuccess, setSentSuccess] = useState(false);
-  const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+  const [poEditKey, setPoEditKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSelectedPoLineIndexes(new Set());
+  }, [activePO?.orderNumber]);
+  const [isExportingPoFile, setIsExportingPoFile] = useState(false);
 
   // Open add modal
   const handleOpenAddModal = () => {
@@ -122,12 +179,11 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
   };
 
   // Submit add or edit
-  const handleSubmitSupplier = (e: React.FormEvent) => {
+  const handleSubmitSupplier = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formData.name?.trim()) return;
 
     if (editingSupplier) {
-      // Update
       const updated: SupplierInfo = {
         ...editingSupplier,
         name: formData.name!.trim(),
@@ -137,10 +193,16 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
         leadTimeAvgDays: Number(formData.leadTimeAvgDays) || 7,
         reliability: (formData.reliability as 'A' | 'B' | 'C') || 'A',
       };
-      setSuppliers(prev => prev.map(s => s.id === editingSupplier.id ? updated : s));
-      saveSupplierToDb(updated).catch(err => console.error('Error updating supplier in DB:', err));
+      setSuppliers((prev) => prev.map((s) => (s.id === editingSupplier.id ? updated : s)));
+      try {
+        const saved = await upsertSupplierInLedger(webAppUrl, updated);
+        setSuppliers((prev) => prev.map((s) => (s.id === saved.id ? saved : s)));
+      } catch (err) {
+        console.error('원장 협력사 수정 실패:', err);
+        const ledgerList = await fetchSuppliersFromLedger(webAppUrl);
+        if (ledgerList.length > 0) setSuppliers(ledgerList);
+      }
     } else {
-      // Create new
       const nextNum = suppliers.length + 1;
       const newId = `V-${String(nextNum).padStart(3, '0')}`;
       const newSupplier: SupplierInfo = {
@@ -153,26 +215,141 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
         leadTimeAvgDays: Number(formData.leadTimeAvgDays) || 7,
         reliability: (formData.reliability as 'A' | 'B' | 'C') || 'A',
       };
-      setSuppliers(prev => [...prev, newSupplier]);
-      saveSupplierToDb(newSupplier).catch(err => console.error('Error saving supplier to DB:', err));
+      setSuppliers((prev) => [...prev, newSupplier]);
+      try {
+        const saved = await upsertSupplierInLedger(webAppUrl, newSupplier);
+        setSuppliers((prev) => prev.map((s) => (s.id === newSupplier.id ? saved : s)));
+      } catch (err) {
+        console.error('원장 협력사 추가 실패:', err);
+        const ledgerList = await fetchSuppliersFromLedger(webAppUrl);
+        if (ledgerList.length > 0) setSuppliers(ledgerList);
+      }
     }
 
     setIsModalOpen(false);
   };
 
-  // Delete supplier
-  const handleDeleteSupplier = (supplier: SupplierInfo) => {
-    setSuppliers(prev => prev.filter(s => s.id !== supplier.id));
-    deleteSupplierFromDb(supplier.id).catch(err => console.error('Error deleting supplier from DB:', err));
+  const handleDeleteSupplier = async (supplier: SupplierInfo) => {
+    setSuppliers((prev) => prev.filter((s) => s.id !== supplier.id));
+    try {
+      await deleteSupplierInLedger(webAppUrl, supplier.id, supplier.recordUuid);
+    } catch (err) {
+      console.error('원장 협력사 삭제 실패:', err);
+      const ledgerList = await fetchSuppliersFromLedger(webAppUrl);
+      if (ledgerList.length > 0) setSuppliers(ledgerList);
+    }
+  };
+
+  const toggleSupplierSelection = (id: string) => {
+    setSelectedSupplierIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleConfirmSupplierBulkDelete = async () => {
+    const targets = suppliers.filter((supplier) => selectedSupplierIds.has(supplier.id));
+    for (const supplier of targets) {
+      await handleDeleteSupplier(supplier);
+    }
+    setSelectedSupplierIds(new Set());
+    setConfirmSupplierBulkDelete(false);
+  };
+
+  const withRecalculatedTotals = (items: PurchaseOrder['items']) => {
+    const nextItems = items.map((item) => {
+      const orderQty = Number(item.orderQty) || 0;
+      const unitPrice = Number(item.unitPrice) || 0;
+      return { ...item, orderQty, unitPrice, totalPrice: orderQty * unitPrice };
+    });
+    const totalAmount = nextItems.reduce((sum, item) => sum + item.totalPrice, 0);
+    const vatAmount = Math.round(totalAmount * 0.1);
+    return {
+      items: nextItems,
+      totalAmount,
+      vatAmount,
+      grandTotal: totalAmount + vatAmount,
+    };
+  };
+
+  const patchPo = (patch: Partial<PurchaseOrder>) => {
+    setActivePO((prev) => (prev ? { ...prev, ...patch } : prev));
+    setPoEditKey(null);
+  };
+
+  const addPoLine = () => {
+    if (!activePO) return;
+    const nextIndex = activePO.items.length;
+    const item: PurchaseOrderItem = {
+      materialId: Date.now(),
+      name: '신규 품목',
+      spec: '',
+      unit: 'EA',
+      unitPrice: 0,
+      orderQty: 1,
+      totalPrice: 0,
+      currentStock: 0,
+      safetyStock: 0,
+      supplier: activePO.supplier,
+      reason: '수기 추가',
+    };
+    setActivePO({
+      ...activePO,
+      ...withRecalculatedTotals([...activePO.items, item]),
+    });
+    setPoEditKey(`item-${nextIndex}-name`);
+  };
+
+  const updatePoItem = (index: number, patch: Partial<PurchaseOrder['items'][number]>) => {
+    if (!activePO) return;
+    const items = activePO.items.map((item, itemIndex) =>
+      itemIndex === index ? { ...item, ...patch } : item,
+    );
+    setActivePO({ ...activePO, ...withRecalculatedTotals(items) });
+    setPoEditKey(null);
+  };
+
+  const poField = (
+    key: string,
+    value: string,
+    onCommit: (next: string) => void,
+    className: string,
+    inputClassName: string,
+    numeric = false,
+  ) => (
+    <PoEditable
+      editing={poEditKey === key}
+      value={value}
+      numeric={numeric}
+      onStart={() => setPoEditKey(key)}
+      onCancel={() => setPoEditKey(null)}
+      onCommit={onCommit}
+      className={className}
+      inputClassName={inputClassName}
+    />
+  );
+
+  const removeSelectedPoLines = () => {
+    if (!activePO || selectedPoLineIndexes.size === 0) return;
+    const remainingItems = activePO.items.filter((_, index) => !selectedPoLineIndexes.has(index));
+    setActivePO({
+      ...activePO,
+      ...withRecalculatedTotals(remainingItems),
+    });
+    setSelectedPoLineIndexes(new Set());
   };
 
   // Generate PO for a selected supplier
   const handleGeneratePO = (supplier: SupplierInfo) => {
-    // Find all materials from this supplier that need order or all materials from this supplier
-    const supplierMaterials = materials.filter(m => 
-      m.supplier.toLowerCase().includes(supplier.name.toLowerCase().split('(')[0].trim()) ||
-      supplier.name.toLowerCase().includes(m.supplier.toLowerCase().split('(')[0].trim())
-    );
+    const supplierMaterials = getMaterialsBySupplier(materials, supplier);
+    if (supplierMaterials.length === 0) {
+      window.alert(
+        `「${supplier.name}」 협력사와 발주처가 일치하는 자재가 자재 DB에 없습니다. 자재 DB의 발주처 필드를 확인해 주세요.`,
+      );
+      return;
+    }
 
     const poItems: PurchaseOrderItem[] = supplierMaterials.map(m => {
       const orderQty = m.currentStock <= m.reorderPoint ? m.eoq : m.moq;
@@ -201,12 +378,22 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
     dueDate.setDate(today.getDate() + supplier.leadTimeAvgDays);
 
     const generatedPO: PurchaseOrder = {
+      documentTitle: '자 재 발 주 서',
       orderNumber: `발주-${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}-${supplier.id}`,
       orderDate: today.toISOString().slice(0, 10),
       supplier: supplier.name,
       contactPerson: supplier.contactPerson,
       phone: supplier.phone,
       deliveryDueDate: dueDate.toISOString().slice(0, 10),
+      buyerName: '주식회사 루씨엠',
+      buyerBusinessNumber: '119-86-59000',
+      deliveryPlace: '루씨엠 중앙제조센터 제1생산공장',
+      buyerContact: '자재구매팀 선임매니저 (02-851-7100)',
+      paymentTerms: '마감 익월 30일 현금 또는 계좌이체',
+      terms: [...DEFAULT_PO_TERMS],
+      confirmLabel: '발주처 확인인',
+      confirmCompany: '주식회사 루씨엠',
+      confirmNote: '직인생략',
       items: poItems,
       totalAmount,
       vatAmount,
@@ -215,39 +402,41 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
     };
 
     setSelectedSupplier(supplier);
+    setPoEditKey(null);
     setActivePO(generatedPO);
-    setSentSuccess(false);
   };
 
-  const handleDownloadPO_PDF = async () => {
-    if (!activePO || isGeneratingPdf) return;
+  const handleDownloadPO_File = async () => {
+    if (!activePO || isExportingPoFile) return;
     try {
-      setIsGeneratingPdf(true);
-      await downloadElementAsPDF('purchase-order-document', {
-        filename: `루씨엠_발주서_${activePO.supplier}_${activePO.orderNumber}.pdf`,
-      });
+      setIsExportingPoFile(true);
+      await downloadPurchaseOrderAsExcel(
+        activePO,
+        `루씨엠_발주서_${activePO.supplier}_${activePO.orderNumber}.xlsx`,
+      );
     } catch (e) {
-      console.error('Failed to generate PO PDF', e);
-      window.print();
+      console.error('Failed to export PO Excel', e);
+      window.alert('Excel 파일 저장에 실패했습니다. 브라우저 다운로드 설정을 확인해 주세요.');
     } finally {
-      setIsGeneratingPdf(false);
+      setIsExportingPoFile(false);
     }
   };
 
   const handlePrintPO = () => {
-    try {
-      window.print();
-    } catch {
-      handleDownloadPO_PDF();
-    }
+    if (!activePO) return;
+    printPurchaseOrderDocument(activePO.orderNumber);
   };
 
-  const handleSendPO = () => {
-    setSentSuccess(true);
-    setTimeout(() => {
-      setSentSuccess(false);
-    }, 4000);
-  };
+  const partyField = (label: string, value: string, onChange: (next: string) => void, emphasize = false) => (
+    <label className="flex items-center gap-2 py-0.5">
+      <span className="w-24 shrink-0 text-slate-500">{label}</span>
+      <input
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className={`min-w-0 flex-1 rounded border border-slate-200 bg-white px-2 py-1 outline-none focus:border-[#BA1B2D] ${emphasize ? 'font-bold text-slate-900' : 'text-slate-800'}`}
+      />
+    </label>
+  );
 
   // Export CSV of materials needing order
   const handleExportOrderNeededCSV = () => {
@@ -323,14 +512,23 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
         </div>
       </div>
 
+      <div className="flex justify-end">
+        <button
+          type="button"
+          disabled={selectedSupplierIds.size === 0}
+          onClick={() => setConfirmSupplierBulkDelete(true)}
+          className="inline-flex items-center gap-1.5 rounded-xl border px-3.5 py-2 text-xs font-bold transition-colors disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 enabled:border-rose-200 enabled:bg-rose-50 enabled:text-[#BA1B2D] enabled:hover:bg-rose-100"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+          내역 삭제
+        </button>
+      </div>
+
       {/* Suppliers Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {suppliers.map((supplier) => {
           // Count items needing order
-          const matchedMaterials = materials.filter(m => 
-            m.supplier.toLowerCase().includes(supplier.name.toLowerCase().split('(')[0].trim()) ||
-            supplier.name.toLowerCase().includes(m.supplier.toLowerCase().split('(')[0].trim())
-          );
+          const matchedMaterials = getMaterialsBySupplier(materials, supplier);
           const needingOrder = matchedMaterials.filter(m => m.currentStock <= m.reorderPoint);
 
           return (
@@ -341,6 +539,13 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
               <div>
                 <div className="flex items-start justify-between gap-2 mb-2">
                   <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={selectedSupplierIds.has(supplier.id)}
+                      onChange={() => toggleSupplierSelection(supplier.id)}
+                      aria-label={`${supplier.name} 선택`}
+                      className="h-4 w-4 rounded border-slate-300 text-[#BA1B2D] focus:ring-[#BA1B2D]"
+                    />
                     <span className="text-xs font-mono font-bold text-[#BA1B2D] bg-rose-50 px-2 py-0.5 rounded">
                       {supplier.id}
                     </span>
@@ -356,13 +561,6 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
                       title="협력사 정보 수정"
                     >
                       <Edit2 className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      onClick={() => handleDeleteSupplier(supplier)}
-                      className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors"
-                      title="협력사 삭제"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>
                 </div>
@@ -553,12 +751,12 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
 
               <div className="flex items-center gap-2 flex-wrap">
                 <button
-                  onClick={handleDownloadPO_PDF}
-                  disabled={isGeneratingPdf}
+                  onClick={handleDownloadPO_File}
+                  disabled={isExportingPoFile}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-[#BA1B2D] hover:bg-[#a01625] rounded-lg shadow-xs transition-colors disabled:opacity-50"
-                  title="발주서를 파일로 저장"
+                  title="발주서를 Excel(.xlsx) 파일로 저장"
                 >
-                  {isGeneratingPdf ? (
+                  {isExportingPoFile ? (
                     <>
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
                       <span>저장 중...</span>
@@ -580,14 +778,6 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
                 </button>
 
                 <button
-                  onClick={handleSendPO}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-[#BA1B2D] hover:bg-[#a01625] rounded-lg transition-colors shadow-xs"
-                >
-                  <Send className="w-3.5 h-3.5" />
-                  <span>거래처 발송</span>
-                </button>
-
-                <button
                   onClick={() => setActivePO(null)}
                   className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100"
                 >
@@ -596,48 +786,68 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
               </div>
             </div>
 
-            {sentSuccess && (
-              <div className="mb-4 p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-xs font-bold text-emerald-800 flex items-center gap-2 print:hidden">
-                <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                <span>발주서가 거래처 담당자({activePO.contactPerson})에게 정상 발송 처리되었습니다.</span>
-              </div>
-            )}
-
             {/* Official Purchase Order Document Sheet */}
-            <div id="purchase-order-document" className="border-2 border-slate-900 p-6 sm:p-8 space-y-6 text-slate-900 font-sans bg-white">
-              {/* PO Title & Doc Number */}
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b-2 border-slate-900 pb-4">
-                <div>
-                  <h1 className="text-2xl sm:text-3xl font-black tracking-widest text-slate-900">
-                    자 재 발 주 서
-                  </h1>
-                </div>
+            <div id="purchase-order-document" className="mx-auto w-full max-w-[794px] border-2 border-slate-900 bg-white p-6 text-slate-900 font-sans sm:p-8">
+              <div className="po-head flex flex-col sm:flex-row sm:items-center justify-between border-b-2 border-slate-900 pb-4">
+                <h1 className="text-2xl sm:text-3xl font-black tracking-widest text-slate-900">
+                  {poField(
+                    'documentTitle',
+                    activePO.documentTitle,
+                    (next) => patchPo({ documentTitle: next }),
+                    'font-black tracking-widest',
+                    'w-full bg-white text-2xl font-black tracking-widest outline-none',
+                  )}
+                </h1>
                 <div className="mt-2 sm:mt-0 text-right text-xs">
-                  <p className="font-mono font-bold text-sm text-[#BA1B2D]">{activePO.orderNumber}</p>
-                  <p className="text-slate-600">발주일자: {activePO.orderDate}</p>
-                  <p className="text-rose-600 font-semibold">납기요청일: {activePO.deliveryDueDate}</p>
+                  <p className="font-mono font-bold text-sm text-[#BA1B2D]">
+                    {poField('orderNumber', activePO.orderNumber, (next) => patchPo({ orderNumber: next }), 'font-mono font-bold text-[#BA1B2D]', 'w-full bg-white text-right font-mono font-bold text-[#BA1B2D] outline-none')}
+                  </p>
+                  <p className="text-slate-600">
+                    발주일자:{' '}
+                    {poField('orderDate', activePO.orderDate, (next) => patchPo({ orderDate: next }), '', 'bg-white text-right outline-none')}
+                  </p>
+                  <p className="text-rose-600 font-semibold">
+                    납기요청일:{' '}
+                    {poField('deliveryDueDate', activePO.deliveryDueDate, (next) => patchPo({ deliveryDueDate: next }), 'text-rose-600 font-semibold', 'bg-white text-right font-semibold text-rose-600 outline-none')}
+                  </p>
                 </div>
               </div>
 
-              {/* Vendor & Buyer Information Grid */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs border border-slate-300 p-3 rounded-lg bg-slate-50/50">
-                {/* Buyer Info */}
+              <div className="po-party-grid mt-6 grid grid-cols-1 md:grid-cols-2 gap-4 text-xs border border-slate-300 p-3 rounded-lg bg-slate-50/50">
                 <div className="space-y-1 pr-2">
                   <p className="font-bold text-[#BA1B2D] border-b border-slate-200 pb-1">발주자</p>
-                  <p><span className="text-slate-500">상호명:</span> <strong>주식회사 루씨엠</strong></p>
-                  <p><span className="text-slate-500">사업자등록번호:</span> 119-86-59000</p>
-                  <p><span className="text-slate-500">납품장소:</span> 루씨엠 중앙제조센터 제1생산공장</p>
-                  <p><span className="text-slate-500">발주담당:</span> 자재구매팀 선임매니저 (02-851-7100)</p>
+                  {partyField('상호명', activePO.buyerName, (next) => patchPo({ buyerName: next }), true)}
+                  {partyField('사업자등록번호', activePO.buyerBusinessNumber, (next) => patchPo({ buyerBusinessNumber: next }))}
+                  {partyField('납품장소', activePO.deliveryPlace, (next) => patchPo({ deliveryPlace: next }))}
+                  {partyField('발주담당', activePO.buyerContact, (next) => patchPo({ buyerContact: next }))}
                 </div>
-
-                {/* Supplier Info */}
-                <div className="space-y-1 pl-2 border-t md:border-t-0 md:border-l border-slate-200 pt-2 md:pt-0">
+                <div className="po-party-supplier space-y-1 border-t border-slate-200 pl-0 pt-2 md:border-l md:border-t-0 md:pl-2 md:pt-0">
                   <p className="font-bold text-slate-800 border-b border-slate-200 pb-1">공급자</p>
-                  <p><span className="text-slate-500">상호명:</span> <strong>{activePO.supplier}</strong></p>
-                  <p><span className="text-slate-500">담당자:</span> {activePO.contactPerson}</p>
-                  <p><span className="text-slate-500">연락처:</span> {activePO.phone}</p>
-                  <p><span className="text-slate-500">결제조건:</span> 마감 익월 30일 현금 또는 계좌이체</p>
+                  {partyField('상호명', activePO.supplier, (next) => patchPo({ supplier: next }), true)}
+                  {partyField('담당자', activePO.contactPerson, (next) => patchPo({ contactPerson: next }))}
+                  {partyField('연락처', activePO.phone, (next) => patchPo({ phone: next }))}
+                  {partyField('결제조건', activePO.paymentTerms, (next) => patchPo({ paymentTerms: next }))}
                 </div>
+              </div>
+
+              <div className="mt-4 flex justify-end gap-2 print:hidden pdf-export-hidden">
+                <button
+                  type="button"
+                  onClick={addPoLine}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-bold text-slate-700 hover:bg-slate-50"
+                >
+                  <Plus className="h-3 w-3" />
+                  항목 추가
+                </button>
+                <button
+                  type="button"
+                  disabled={selectedPoLineIndexes.size === 0}
+                  onClick={removeSelectedPoLines}
+                  className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[11px] font-bold transition-colors disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 enabled:border-rose-200 enabled:bg-rose-50 enabled:text-[#BA1B2D] enabled:hover:bg-rose-100"
+                >
+                  <Trash2 className="h-3 w-3" />
+                  내역 삭제
+                </button>
               </div>
 
               {/* Items Table */}
@@ -645,6 +855,24 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
                 <table className="w-full text-xs text-left border border-slate-300">
                   <thead className="bg-slate-100 font-bold border-b border-slate-300 text-slate-800">
                     <tr>
+                      <th className="p-2 w-8 text-center print:hidden pdf-export-hidden">
+                        <input
+                          type="checkbox"
+                          checked={
+                            activePO.items.length > 0 &&
+                            activePO.items.every((_, index) => selectedPoLineIndexes.has(index))
+                          }
+                          onChange={() => {
+                            if (activePO.items.every((_, index) => selectedPoLineIndexes.has(index))) {
+                              setSelectedPoLineIndexes(new Set());
+                            } else {
+                              setSelectedPoLineIndexes(new Set(activePO.items.map((_, index) => index)));
+                            }
+                          }}
+                          aria-label="발주 품목 전체 선택"
+                          className="h-3.5 w-3.5 rounded border-slate-300 text-[#BA1B2D] focus:ring-[#BA1B2D]"
+                        />
+                      </th>
                       <th className="p-2 w-10 text-center">순번</th>
                       <th className="p-2">품목명 및 규격</th>
                       <th className="p-2 text-center">단위</th>
@@ -656,17 +884,39 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
                   <tbody className="divide-y divide-slate-200">
                     {activePO.items.map((item, idx) => (
                       <tr key={idx}>
+                        <td className="p-2 text-center print:hidden pdf-export-hidden">
+                          <input
+                            type="checkbox"
+                            checked={selectedPoLineIndexes.has(idx)}
+                            onChange={() => {
+                              setSelectedPoLineIndexes((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(idx)) next.delete(idx);
+                                else next.add(idx);
+                                return next;
+                              });
+                            }}
+                            aria-label={`${item.name} 선택`}
+                            className="h-3.5 w-3.5 rounded border-slate-300 text-[#BA1B2D] focus:ring-[#BA1B2D]"
+                          />
+                        </td>
                         <td className="p-2 text-center text-slate-500">{idx + 1}</td>
                         <td className="p-2">
-                          <span className="font-bold block">{item.name}</span>
-                          <span className="text-[11px] text-slate-500">{item.spec}</span>
+                          <div className="font-bold">
+                            {poField(`item-${idx}-name`, item.name, (next) => updatePoItem(idx, { name: next }), 'block font-bold', 'w-full bg-white text-xs font-bold outline-none')}
+                          </div>
+                          <div className="text-[11px] text-slate-500">
+                            {poField(`item-${idx}-spec`, item.spec, (next) => updatePoItem(idx, { spec: next }), 'block text-[11px] text-slate-500', 'mt-0.5 w-full bg-white text-[11px] text-slate-500 outline-none')}
+                          </div>
                         </td>
-                        <td className="p-2 text-center font-medium">{item.unit}</td>
+                        <td className="p-2 text-center font-medium">
+                          {poField(`item-${idx}-unit`, item.unit, (next) => updatePoItem(idx, { unit: next }), 'font-medium', 'w-14 bg-white text-center text-xs outline-none')}
+                        </td>
                         <td className="p-2 text-right font-mono font-bold text-slate-900">
-                          {item.orderQty.toLocaleString()}
+                          {poField(`item-${idx}-qty`, String(item.orderQty), (next) => updatePoItem(idx, { orderQty: Number(next) || 0 }), 'font-mono font-bold', 'w-20 bg-white text-right font-mono text-xs font-bold outline-none', true)}
                         </td>
                         <td className="p-2 text-right font-mono">
-                          {item.unitPrice.toLocaleString()}
+                          {poField(`item-${idx}-price`, String(item.unitPrice), (next) => updatePoItem(idx, { unitPrice: Number(next) || 0 }), 'font-mono', 'w-24 bg-white text-right font-mono text-xs outline-none', true)}
                         </td>
                         <td className="p-2 text-right font-mono font-bold">
                           {item.totalPrice.toLocaleString()}
@@ -676,15 +926,15 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
                   </tbody>
                   <tfoot className="border-t-2 border-slate-900 bg-slate-50 font-bold">
                     <tr>
-                      <td colSpan={5} className="p-2 text-right text-slate-600">공급가액 소계:</td>
+                      <td colSpan={6} className="p-2 text-right text-slate-600">공급가액 소계:</td>
                       <td className="p-2 text-right font-mono">{activePO.totalAmount.toLocaleString()}원</td>
                     </tr>
                     <tr>
-                      <td colSpan={5} className="p-2 text-right text-slate-600">부가가치세 (10%):</td>
+                      <td colSpan={6} className="p-2 text-right text-slate-600">부가가치세 (10%):</td>
                       <td className="p-2 text-right font-mono">{activePO.vatAmount.toLocaleString()}원</td>
                     </tr>
                     <tr className="text-sm bg-rose-50 text-rose-950 font-black">
-                      <td colSpan={5} className="p-2 text-right">총 발주 금액 (부가세 포함):</td>
+                      <td colSpan={6} className="p-2 text-right">총 발주 금액 (부가세 포함):</td>
                       <td className="p-2 text-right font-black font-mono text-[#BA1B2D]">{activePO.grandTotal.toLocaleString()}원</td>
                     </tr>
                   </tfoot>
@@ -692,21 +942,65 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
               </div>
 
               {/* Terms & Official Stamp */}
-              <div className="flex flex-col sm:flex-row items-center justify-between gap-4 text-[11px] text-slate-600 pt-4 border-t border-slate-200">
+              <div className="mt-6 flex flex-col sm:flex-row items-center justify-between gap-4 text-[11px] text-slate-600 pt-4 border-t border-slate-200">
                 <div className="space-y-1">
-                  <p>1. 모든 납품 자재는 본사 사전 승인된 규격서 및 시험성적서를 만족해야 합니다.</p>
-                  <p>2. 납기 지연 시 일 지체상금률(0.15%)이 적용될 수 있습니다.</p>
-                  <p>3. 물품 인수 검수 시 불량품 발생 시 즉시 무상 교환을 원칙으로 합니다.</p>
+                  {activePO.terms.map((term, index) => (
+                    <p key={index}>
+                      {index + 1}.{' '}
+                      {poField(
+                        `term-${index}`,
+                        term,
+                        (next) => {
+                          const terms = [...activePO.terms];
+                          terms[index] = next;
+                          patchPo({ terms });
+                        },
+                        '',
+                        'w-full bg-white outline-none',
+                      )}
+                    </p>
+                  ))}
                 </div>
 
                 <div className="border border-slate-400 p-3 rounded-md text-center min-w-[140px] bg-slate-50">
-                  <span className="text-[10px] text-slate-500 block">발주처 확인인</span>
-                  <span className="text-xs font-bold text-slate-900 block mt-1">주식회사 루씨엠</span>
+                  <span className="text-[10px] text-slate-500 block">
+                    {poField('confirmLabel', activePO.confirmLabel, (next) => patchPo({ confirmLabel: next }), 'text-[10px] text-slate-500', 'w-full bg-slate-50 text-center text-[10px] outline-none')}
+                  </span>
+                  <span className="text-xs font-bold text-slate-900 block mt-1">
+                    {poField('confirmCompany', activePO.confirmCompany, (next) => patchPo({ confirmCompany: next }), 'text-xs font-bold', 'w-full bg-slate-50 text-center text-xs font-bold outline-none')}
+                  </span>
                   <div className="w-10 h-10 border border-rose-400 rounded-full mx-auto my-1 flex items-center justify-center text-[10px] text-rose-500 font-bold">
-                    직인생략
+                    {poField('confirmNote', activePO.confirmNote, (next) => patchPo({ confirmNote: next }), 'text-[10px] text-rose-500 font-bold', 'w-8 bg-transparent text-center text-[10px] font-bold text-rose-500 outline-none')}
                   </div>
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmSupplierBulkDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
+            <h3 className="text-base font-bold text-slate-900">선택 협력사 삭제</h3>
+            <p className="mt-2 text-xs text-slate-600">
+              선택한 {selectedSupplierIds.size}개 협력사를 원장에서 삭제합니다. 계속하시겠습니까?
+            </p>
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmSupplierBulkDelete(false)}
+                className="rounded-xl px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100"
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmSupplierBulkDelete}
+                className="rounded-xl bg-[#BA1B2D] px-4 py-2 text-xs font-bold text-white hover:bg-[#a01625]"
+              >
+                삭제
+              </button>
             </div>
           </div>
         </div>

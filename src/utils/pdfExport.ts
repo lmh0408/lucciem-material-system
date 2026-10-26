@@ -4,6 +4,67 @@ import html2canvas from 'html2canvas';
 export interface PDFExportOptions {
   filename?: string;
   onProgress?: (step: string) => void;
+  /** html2canvas 캡처 시 숨길 요소 (인쇄 UI·체크박스 등) */
+  hideSelectors?: string[];
+}
+
+function sanitizePdfFilename(name: string): string {
+  return name.replace(/[\\/:*?"<>|]/g, '_').trim() || 'download.pdf';
+}
+
+/** Tailwind v4(oklch) 등 html2canvas 파싱 오류 방지용 클론 정리 */
+function prepareClonedDocumentForCanvas(
+  clonedDoc: Document,
+  clonedElement: HTMLElement,
+  hideSelectors: string[],
+): void {
+  clonedDoc.querySelectorAll('link[rel="stylesheet"], style').forEach((node) => {
+    node.parentNode?.removeChild(node);
+  });
+
+  const injected = clonedDoc.createElement('style');
+  injected.textContent = `
+    #${clonedElement.id}, #${clonedElement.id} * {
+      box-sizing: border-box;
+      font-family: "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+    }
+    #${clonedElement.id} {
+      background: #ffffff !important;
+      color: #0f172a !important;
+      width: 794px;
+    }
+    #${clonedElement.id} table {
+      border-collapse: collapse;
+      width: 100%;
+    }
+    #${clonedElement.id} th,
+    #${clonedElement.id} td {
+      border: 1px solid #cbd5e1;
+    }
+    #${clonedElement.id} [class*="bg-slate"] {
+      background-color: #f8fafc !important;
+    }
+    #${clonedElement.id} thead {
+      background-color: #f1f5f9 !important;
+    }
+    #${clonedElement.id} [class*="text-rose"],
+    #${clonedElement.id} [class*="BA1B2D"] {
+      color: #ba1b2d !important;
+    }
+    .pdf-export-hidden {
+      display: none !important;
+    }
+  `;
+  clonedDoc.head.appendChild(injected);
+
+  hideSelectors.forEach((selector) => {
+    clonedElement.querySelectorAll(selector).forEach((el) => {
+      (el as HTMLElement).style.display = 'none';
+    });
+  });
+  clonedElement.querySelectorAll('.pdf-export-hidden').forEach((el) => {
+    (el as HTMLElement).style.display = 'none';
+  });
 }
 
 /**
@@ -16,8 +77,10 @@ export async function downloadElementAsPDF(
 ): Promise<boolean> {
   const {
     filename = '루씨엠_스마트통합자재관리_제안서.pdf',
-    onProgress
+    onProgress,
+    hideSelectors = [],
   } = options;
+  const safeFilename = sanitizePdfFilename(filename.endsWith('.pdf') ? filename : `${filename}.pdf`);
 
   const targetElement = document.getElementById(elementId);
   if (!targetElement) {
@@ -43,11 +106,14 @@ export async function downloadElementAsPDF(
     if (onProgress) onProgress('고해상도 이미지 변환 중 (Canvas)...');
 
     const canvas = await html2canvas(targetElement, {
-      scale: 1.5, // Crisp resolution without blowing up memory
+      scale: 1.5,
       useCORS: true,
       logging: false,
       backgroundColor: '#ffffff',
-      windowWidth: 1200,
+      windowWidth: 820,
+      onclone: (clonedDoc, clonedElement) => {
+        prepareClonedDocumentForCanvas(clonedDoc, clonedElement, hideSelectors);
+      },
     });
 
     // Restore hidden elements
@@ -87,7 +153,7 @@ export async function downloadElementAsPDF(
     }
 
     if (onProgress) onProgress('PDF 다운로드 시작...');
-    pdf.save(filename);
+    pdf.save(safeFilename);
 
     return true;
   } catch (error) {

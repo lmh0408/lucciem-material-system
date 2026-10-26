@@ -9,7 +9,6 @@ import {
   CheckCircle2, 
   X, 
   SlidersHorizontal,
-  Info,
   Layers,
   Building2,
   DollarSign
@@ -51,7 +50,8 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
   const [editingItem, setEditingItem] = useState<MaterialItem | null>(null);
   const [selectedItemId, setSelectedItemId] = useState<number | null>(null);
   // Delete confirm modal state (in-app modal to prevent sandbox iframe from blocking window.confirm)
-  const [itemToDelete, setItemToDelete] = useState<MaterialItem | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [itemsPendingDelete, setItemsPendingDelete] = useState<MaterialItem[] | null>(null);
 
   // Open edit modal if requested from another screen
   React.useEffect(() => {
@@ -118,6 +118,28 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
     });
   }, [materials, searchTerm, selectedCategory, selectedModel]);
 
+  const buildDefaultUsedIn = (model: typeof selectedModel) => {
+    const base = { outdoor: 0, indoor: 0, mobile: 0, lsend: 0 };
+    if (model === 'outdoor') return { ...base, outdoor: 1 };
+    if (model === 'indoor') return { ...base, indoor: 1 };
+    if (model === 'mobile') return { ...base, mobile: 1 };
+    if (model === 'lsend') return { ...base, lsend: 1 };
+    return base;
+  };
+
+  const ensureUsedInForSelectedModel = (
+    model: typeof selectedModel,
+    usedIn: { outdoor: number; indoor: number; mobile: number; lsend: number },
+  ) => {
+    if (model === 'ALL') return usedIn;
+    const next = { ...usedIn };
+    if (model === 'outdoor' && next.outdoor <= 0) next.outdoor = 1;
+    if (model === 'indoor' && next.indoor <= 0) next.indoor = 1;
+    if (model === 'mobile' && next.mobile <= 0) next.mobile = 1;
+    if (model === 'lsend' && next.lsend <= 0) next.lsend = 1;
+    return next;
+  };
+
   // Open add modal
   const handleOpenAddModal = () => {
     setEditingItem(null);
@@ -132,7 +154,7 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
       contactPerson: '',
       phone: '',
       notes: '',
-      usedIn: { outdoor: 0, indoor: 0, mobile: 0, lsend: 0 },
+      usedIn: buildDefaultUsedIn(selectedModel),
       currentStock: 100,
       reorderPoint: 40,
       leadTimeDays: 7,
@@ -159,10 +181,16 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
       return;
     }
 
-    const outdoorUsage = Number(formData.usedIn?.outdoor || 0);
-    const indoorUsage = Number(formData.usedIn?.indoor || 0);
-    const mobileUsage = Number(formData.usedIn?.mobile || 0);
-    const lsendUsage = Number(formData.usedIn?.lsend || 0);
+    const normalizedUsedIn = ensureUsedInForSelectedModel(selectedModel, {
+      outdoor: Number(formData.usedIn?.outdoor || 0),
+      indoor: Number(formData.usedIn?.indoor || 0),
+      mobile: Number(formData.usedIn?.mobile || 0),
+      lsend: Number(formData.usedIn?.lsend || 0),
+    });
+    const outdoorUsage = normalizedUsedIn.outdoor;
+    const indoorUsage = normalizedUsedIn.indoor;
+    const mobileUsage = normalizedUsedIn.mobile;
+    const lsendUsage = normalizedUsedIn.lsend;
 
     const usageCount = 
       (outdoorUsage > 0 ? 1 : 0) +
@@ -217,7 +245,8 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
       onUpdateMaterial(updated);
     } else {
       // Create new
-      const nextId = materials.length > 0 ? Math.max(...materials.map(m => m.id)) + 1 : 1;
+      const numericIds = materials.map((m) => m.id).filter((id) => Number.isFinite(id));
+      const nextId = numericIds.length > 0 ? Math.max(...numericIds) + 1 : 1;
       const newItem: MaterialItem = {
         id: nextId,
         originalNo: nextId,
@@ -248,25 +277,56 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
         eoq: Math.max(Number(formData.moq || 1), Math.ceil(dailyUsage * 30)),
       };
       onAddMaterial(newItem);
+      setSearchTerm('');
+      setSelectedCategory('ALL');
+      setSelectedItemId(newItem.id);
     }
 
     setIsModalOpen(false);
   };
 
-  // Delete item handlers (in-app modal ensures reliable deletion in sandboxed iframes)
-  const handleDeleteClick = (item: MaterialItem) => {
-    setItemToDelete(item);
+  const selectedMaterials = useMemo(
+    () => materials.filter((item) => selectedIds.has(item.id)),
+    [materials, selectedIds],
+  );
+
+  const allFilteredSelected =
+    filteredMaterials.length > 0 && filteredMaterials.every((item) => selectedIds.has(item.id));
+
+  const toggleSelectAllFiltered = () => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allFilteredSelected) {
+        filteredMaterials.forEach((item) => next.delete(item.id));
+      } else {
+        filteredMaterials.forEach((item) => next.add(item.id));
+      }
+      return next;
+    });
+  };
+
+  const toggleSelectRow = (id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   };
 
   const handleConfirmDelete = () => {
-    if (itemToDelete) {
-      onDeleteMaterial(itemToDelete.id);
-      setItemToDelete(null);
-    }
+    if (!itemsPendingDelete?.length) return;
+    itemsPendingDelete.forEach((item) => onDeleteMaterial(item.id));
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      itemsPendingDelete.forEach((item) => next.delete(item.id));
+      return next;
+    });
+    setItemsPendingDelete(null);
   };
 
   const handleCancelDelete = () => {
-    setItemToDelete(null);
+    setItemsPendingDelete(null);
   };
 
   return (
@@ -417,10 +477,16 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
           </div>
         </div>
 
-        {/* 자재 편집 도움말 팁 배너 */}
-        <div className="flex items-center gap-2.5 px-4 py-2.5 bg-rose-50/80 border border-rose-200/90 rounded-xl text-xs text-rose-950 font-medium">
-          <Info className="w-4 h-4 text-[#BA1B2D] shrink-0" />
-          <span>💡 <strong>자재 사양 및 재고 편집:</strong> 편집하고자 하는 자재 항목을 <strong>더블 클릭</strong>하면 수정 모달이 열립니다. 수정 후 <strong>[수정 내용 저장]</strong>을 누르면 변경되고, <strong>[취소]</strong>를 누르면 기존 데이터가 유지됩니다.</span>
+        <div className="flex justify-end">
+          <button
+            type="button"
+            disabled={selectedIds.size === 0}
+            onClick={() => setItemsPendingDelete(selectedMaterials)}
+            className="inline-flex items-center gap-1.5 rounded-xl border px-3.5 py-2 text-xs font-bold transition-colors disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 enabled:border-rose-200 enabled:bg-rose-50 enabled:text-[#BA1B2D] enabled:hover:bg-rose-100"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            내역 삭제
+          </button>
         </div>
 
         {/* Materials Table */}
@@ -429,6 +495,15 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
             <table className="w-full text-left text-xs border-collapse">
               <thead className="bg-slate-50 text-slate-700 font-semibold border-b border-slate-200">
                 <tr>
+                  <th className="py-3 px-2.5 text-center w-10">
+                    <input
+                      type="checkbox"
+                      checked={allFilteredSelected}
+                      onChange={toggleSelectAllFiltered}
+                      aria-label="현재 목록 전체 선택"
+                      className="h-4 w-4 rounded border-slate-300 text-[#BA1B2D] focus:ring-[#BA1B2D]"
+                    />
+                  </th>
                   <th className="py-3 px-2.5 text-center w-12">No</th>
                   <th className="py-3 px-3 min-w-[160px]">품목명 (더블 클릭 시 편집)</th>
                   <th className="py-3 px-3 min-w-[150px]">규격</th>
@@ -455,7 +530,6 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
                   <th className="py-3 px-3 min-w-[100px]">발주처</th>
                   <th className="py-3 px-3 min-w-[120px]">담당자 / 연락처</th>
                   <th className="py-3 px-3 min-w-[130px]">비고</th>
-                  <th className="py-3 px-2.5 text-center w-16">삭제</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -478,6 +552,15 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
                       }`}
                       title="더블 클릭하여 자재 사양 및 재고 수정"
                     >
+                      <td className="py-2.5 px-2.5 text-center" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(item.id)}
+                          onChange={() => toggleSelectRow(item.id)}
+                          aria-label={`${item.name} 선택`}
+                          className="h-4 w-4 rounded border-slate-300 text-[#BA1B2D] focus:ring-[#BA1B2D]"
+                        />
+                      </td>
                       {/* [A열] No */}
                       <td className="py-2.5 px-2.5 text-center font-mono text-slate-500">
                         {idx + 1}
@@ -618,23 +701,6 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
                         </div>
                       </td>
 
-                      {/* 삭제 버튼 */}
-                      <td className="py-2.5 px-2.5 text-center" onClick={(e) => e.stopPropagation()}>
-                        <div className="flex items-center justify-center">
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteClick(item);
-                            }}
-                            className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 active:scale-95 transition-all cursor-pointer group-hover:text-slate-500"
-                            title={`'${item.name}' 자재 삭제`}
-                            aria-label={`'${item.name}' 자재 삭제`}
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </td>
                     </tr>
                   ))
                 )}
@@ -958,7 +1024,7 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
       )}
       {/* 등록 및 수정 모달 종료 */}
       {/* 자재 삭제 확인 모달 (iFrame 환경에서도 100% 동작하는 안전한 모달) */}
-      {itemToDelete && (
+      {itemsPendingDelete && itemsPendingDelete.length > 0 && (
         <div 
           className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150"
           onClick={handleCancelDelete}
@@ -973,35 +1039,23 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
               </div>
               <div>
                 <h3 className="text-base font-bold text-slate-900">자재 항목 삭제 확인</h3>
-                <p className="text-xs text-slate-500">삭제 시 DB 및 관리 목록에서 즉시 제거됩니다.</p>
+                <p className="text-xs text-slate-500">선택한 항목이 원장 및 관리 목록에서 제거됩니다.</p>
               </div>
             </div>
 
-            <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 space-y-2 mb-5 text-xs">
-              <div className="flex justify-between items-start gap-2">
-                <span className="text-slate-500 font-medium shrink-0">품목명:</span>
-                <span className="font-bold text-slate-900 text-right">{itemToDelete.name}</span>
-              </div>
-              <div className="flex justify-between items-start gap-2">
-                <span className="text-slate-500 font-medium shrink-0">규격:</span>
-                <span className="text-slate-700 text-right font-mono">{itemToDelete.spec}</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-slate-500 font-medium">현재 재고:</span>
-                <span className="text-slate-800 font-bold font-mono">
-                  {itemToDelete.currentStock.toLocaleString()} {itemToDelete.unit}
-                </span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-slate-500 font-medium">안전 재고:</span>
-                <span className="text-slate-700 font-mono">
-                  {(itemToDelete.safetyStock || 30).toLocaleString()} {itemToDelete.unit}
-                </span>
-              </div>
+            <div className="mb-5 max-h-48 overflow-y-auto rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs">
+              <p className="mb-2 font-semibold text-slate-700">삭제 대상 {itemsPendingDelete.length}건</p>
+              <ul className="space-y-1 text-slate-600">
+                {itemsPendingDelete.map((item) => (
+                  <li key={item.id} className="truncate">
+                    · {item.name} ({item.spec})
+                  </li>
+                ))}
+              </ul>
             </div>
 
             <p className="text-xs text-slate-600 mb-6">
-              정말로 <strong className="text-slate-900">'{itemToDelete.name}'</strong> 자재 항목을 삭제하시겠습니까?
+              선택한 <strong className="text-slate-900">{itemsPendingDelete.length}개</strong> 자재 항목을 삭제하시겠습니까?
             </p>
 
             <div className="flex items-center justify-end gap-3">
