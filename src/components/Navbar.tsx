@@ -19,8 +19,8 @@ import {
 export type TabType = 'materials' | 'simulator' | 'suppliers';
 export type DbStatus = 'connected' | 'loading' | 'syncing' | 'error';
 
-/** 화면 표시 버전 v1.0 */
-const DISPLAYED_APP_VERSION = 'v1.0';
+/** 화면 표시 버전 v1.1 */
+const DISPLAYED_APP_VERSION = 'v1.1';
 
 interface NavbarProps {
   activeTab: TabType;
@@ -94,7 +94,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                   ? 'bg-[#BA1B2D] text-white border border-red-700 ring-4 ring-rose-400/50 scale-95 shadow-inner cursor-wait animate-pulse'
                   : 'text-[#BA1B2D] bg-rose-50 border border-rose-200 hover:bg-rose-100 hover:shadow-xs'
               }`}
-              title="현재 앱 자재 데이터를 원장 자재관리DB에 저장합니다"
+              title="현재 앱의 자재·협력사 데이터를 원장(자재관리DB·협력사관리DB)에 저장합니다"
             >
               {isSaving ? (
                 <>

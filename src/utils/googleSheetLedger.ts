@@ -350,6 +350,26 @@ export async function replaceAllMaterialsInLedger(
   return Number(result.count ?? materials.length);
 }
 
+export async function saveLedgerSnapshot(
+  webAppUrl: string,
+  materials: MaterialItem[],
+  suppliers: SupplierInfo[],
+): Promise<{ materialCount: number; supplierCount: number }> {
+  const result = await callLedgerApi<{
+    success: boolean;
+    materialCount: number;
+    supplierCount: number;
+  }>(webAppUrl, {
+    action: 'saveLedger',
+    materials,
+    suppliers,
+  });
+  return {
+    materialCount: Number(result.materialCount ?? materials.length),
+    supplierCount: Number(result.supplierCount ?? suppliers.length),
+  };
+}
+
 export async function replaceAllSuppliersInLedger(
   webAppUrl: string,
   suppliers: SupplierInfo[],

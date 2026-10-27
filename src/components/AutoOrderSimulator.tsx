@@ -9,17 +9,19 @@ import {
 } from 'lucide-react';
 import { RAW_MATERIALS_DATA } from '../data/materialsData';
 import { MaterialItem } from '../types/inventory';
+import { displayedCurrentStock, displayedSafetyStock, stockStatus } from '../utils/stockDisplay';
+import { MaterialUsedModelsCell } from './MaterialUsedModelsCell';
 
 interface AutoOrderSimulatorProps {
   materials?: MaterialItem[];
   onEditMaterial?: (item: MaterialItem) => void;
-  onDeleteMaterial?: (id: number) => void;
+  onDeleteMaterials?: (ids: number[]) => void;
 }
 
 export const AutoOrderSimulator: React.FC<AutoOrderSimulatorProps> = ({
   materials = RAW_MATERIALS_DATA,
   onEditMaterial,
-  onDeleteMaterial,
+  onDeleteMaterials,
 }) => {
   const [filterStatus, setFilterStatus] = useState<string>('ALL');
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -50,37 +52,26 @@ export const AutoOrderSimulator: React.FC<AutoOrderSimulatorProps> = ({
     });
   }, [materials, selectedModel]);
 
-  // Evaluate order status using manager-set reorderPoint and leadTimeDays
   const evaluatedMaterials = useMemo(() => {
     return modelFilteredMaterials.map(item => {
-      const rop = item.reorderPoint > 0 ? item.reorderPoint : (item.safetyStock || 30);
-      
-      // Order needed if current stock is at or below reorder point
-      const isOrderNeeded = item.currentStock <= rop;
-      const isWarning = !isOrderNeeded && item.currentStock <= Math.ceil(rop * 1.25);
-
-      // Order quantity needed: shortage up to ROP + MOQ, or at least MOQ
-      let orderQty = 0;
-      if (isOrderNeeded) {
-        const shortage = rop - item.currentStock;
-        orderQty = Math.max(item.moq || 10, shortage > 0 ? Math.ceil(shortage / (item.moq || 1)) * (item.moq || 1) : (item.moq || 10));
-      }
-
-      const orderCost = isOrderNeeded ? orderQty * item.unitPrice : 0;
-
-      let computedStatus: 'ORDER_NEEDED' | 'WARNING' | 'NORMAL' = 'NORMAL';
-      if (isOrderNeeded) computedStatus = 'ORDER_NEEDED';
-      else if (isWarning) computedStatus = 'WARNING';
+      const current = displayedCurrentStock(item);
+      const safety = displayedSafetyStock(item, selectedModel);
+      const computedStatus = stockStatus(current, safety);
+      const moq = item.moq || 10;
+      const shortage = safety - current;
+      const orderQty = computedStatus === 'ORDER_NEEDED'
+        ? Math.max(moq, shortage > 0 ? Math.ceil(shortage / moq) * moq : moq)
+        : 0;
+      const orderCost = orderQty * (item.unitPrice || 0);
 
       return {
         ...item,
-        reorderPoint: rop,
         orderQty,
         orderCost,
         computedStatus,
       };
     });
-  }, [modelFilteredMaterials]);
+  }, [modelFilteredMaterials, selectedModel]);
 
   const orderNeededList = evaluatedMaterials.filter(r => r.computedStatus === 'ORDER_NEEDED');
   const warningList = evaluatedMaterials.filter(r => r.computedStatus === 'WARNING');
@@ -131,8 +122,8 @@ export const AutoOrderSimulator: React.FC<AutoOrderSimulatorProps> = ({
   };
 
   const handleConfirmBulkDelete = () => {
-    if (!onDeleteMaterial) return;
-    selectedIds.forEach((id) => onDeleteMaterial(id));
+    if (!onDeleteMaterials || selectedIds.size === 0) return;
+    onDeleteMaterials([...selectedIds]);
     setSelectedIds(new Set());
     setConfirmBulkDelete(false);
   };
@@ -141,7 +132,7 @@ export const AutoOrderSimulator: React.FC<AutoOrderSimulatorProps> = ({
     <div className="space-y-6 max-w-7xl mx-auto py-4">
       {/* Model Tabs Bar (자재 관리 탭과 100% 동일한 UX 일관성 적용) */}
       <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs">
-        <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex items-center gap-2 mr-2">
               <span className="p-1.5 bg-rose-50 text-[#BA1B2D] rounded-lg">
@@ -210,14 +201,6 @@ export const AutoOrderSimulator: React.FC<AutoOrderSimulatorProps> = ({
               L.SEND case ({modelCounts.lsend}종)
             </button>
           </div>
-
-          <div className="text-xs text-slate-500">
-            {selectedModel === 'ALL' && '전체 자재 기준 현황'}
-            {selectedModel === 'outdoor' && <span className="text-emerald-700 font-bold">옥외보관함 투입 자재 기준 현황</span>}
-            {selectedModel === 'indoor' && <span className="text-[#BA1B2D] font-bold">실내보관함 투입 자재 기준 현황</span>}
-            {selectedModel === 'mobile' && <span className="text-amber-700 font-bold">이동형보관함 투입 자재 기준 현황</span>}
-            {selectedModel === 'lsend' && <span className="text-indigo-700 font-bold">L.SEND case 투입 자재 기준 현황</span>}
-          </div>
         </div>
       </div>
 
@@ -242,7 +225,7 @@ export const AutoOrderSimulator: React.FC<AutoOrderSimulatorProps> = ({
             <span className="text-2xl font-black text-rose-600">{orderNeededList.length}건</span>
           </div>
           <div className="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between text-xs font-bold text-rose-700">
-            <span>총 예상 발주 금액</span>
+            <span>안전재고의 50% 미만</span>
             <span>{totalAutoOrderCost.toLocaleString()}원</span>
           </div>
         </button>
@@ -261,12 +244,12 @@ export const AutoOrderSimulator: React.FC<AutoOrderSimulatorProps> = ({
               <div className="w-8 h-8 rounded-lg bg-amber-100 text-amber-600 flex items-center justify-center">
                 <AlertTriangle className="w-4 h-4" />
               </div>
-              <span className="font-bold text-slate-900 text-sm">재고 주의 (근접)</span>
+              <span className="font-bold text-slate-900 text-sm">재고 주의</span>
             </div>
             <span className="text-2xl font-black text-amber-600">{warningList.length}건</span>
           </div>
           <div className="mt-3 pt-2 border-t border-slate-100 text-xs text-amber-700 font-medium">
-            공급처 납기 소요일 사전 모니터링 요망
+            안전재고의 50% 이상, 100% 미만
           </div>
         </button>
 
@@ -289,7 +272,7 @@ export const AutoOrderSimulator: React.FC<AutoOrderSimulatorProps> = ({
             <span className="text-2xl font-black text-emerald-600">{normalList.length}건</span>
           </div>
           <div className="mt-3 pt-2 border-t border-slate-100 text-xs text-emerald-700 font-medium">
-            정기 월말 재고 실사 대상
+            안전재고 100% 이상
           </div>
         </button>
       </div>
@@ -358,12 +341,12 @@ export const AutoOrderSimulator: React.FC<AutoOrderSimulatorProps> = ({
         <div className="px-4 py-2 border-b border-slate-100 flex justify-end bg-white">
           <button
             type="button"
-            disabled={selectedIds.size === 0 || !onDeleteMaterial}
+            disabled={selectedIds.size === 0 || !onDeleteMaterials}
             onClick={() => setConfirmBulkDelete(true)}
             className="inline-flex items-center gap-1.5 rounded-xl border px-3.5 py-2 text-xs font-bold transition-colors disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 enabled:border-rose-200 enabled:bg-rose-50 enabled:text-[#BA1B2D] enabled:hover:bg-rose-100"
           >
             <Trash2 className="h-3.5 w-3.5" />
-            내역 삭제
+            항목 삭제
           </button>
         </div>
 
@@ -383,36 +366,25 @@ export const AutoOrderSimulator: React.FC<AutoOrderSimulatorProps> = ({
                 <th className="py-2.5 px-2.5 w-12 text-center">No</th>
                 <th className="py-2.5 px-3 min-w-[130px]">품목명</th>
                 <th className="py-2.5 px-3 min-w-[140px]">규격</th>
+                <th className="py-2.5 px-3 text-center min-w-[90px]">재고 상태</th>
                 <th className="py-2.5 px-3 text-right min-w-[85px]">현재 재고</th>
                 <th className="py-2.5 px-3 text-right min-w-[80px]">안전 재고</th>
-                <th className="py-2.5 px-3 text-center min-w-[95px]">
-                  {selectedModel === 'outdoor' && (
-                    <span className="text-emerald-800 font-bold">대당 수량 (옥외)</span>
-                  )}
-                  {selectedModel === 'indoor' && (
-                    <span className="text-[#BA1B2D] font-bold">대당 수량 (실내)</span>
-                  )}
-                  {selectedModel === 'mobile' && (
-                    <span className="text-amber-800 font-bold">대당 수량 (이동)</span>
-                  )}
-                  {selectedModel === 'lsend' && (
-                    <span className="text-indigo-800 font-bold">대당 수량 (L.SEND)</span>
-                  )}
-                  {selectedModel === 'ALL' && '대당 수량'}
-                </th>
+                <th className="py-2.5 px-3 text-center min-w-[95px]">사용 모델</th>
+                {selectedModel !== 'ALL' && (
+                  <th className="py-2.5 px-3 text-center min-w-[90px]">대당 수량</th>
+                )}
                 <th className="py-2.5 px-2 text-center w-12">단위</th>
                 <th className="py-2.5 px-3 text-right min-w-[80px]">단가</th>
                 <th className="py-2.5 px-2.5 text-center min-w-[75px]">조달 소요일</th>
                 <th className="py-2.5 px-3 min-w-[95px]">발주처</th>
                 <th className="py-2.5 px-3 min-w-[110px]">담당자 / 연락처</th>
-                <th className="py-2.5 px-3 text-center min-w-[90px]">재고 상태</th>
                 <th className="py-2.5 px-3 min-w-[110px]">비고</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {displayedList.length === 0 ? (
                 <tr>
-                  <td colSpan={14} className="text-center py-8 text-slate-400">
+                  <td colSpan={selectedModel === 'ALL' ? 14 : 15} className="text-center py-8 text-slate-400">
                     조건과 일치하는 자재가 없습니다.
                   </td>
                 </tr>
@@ -458,83 +430,69 @@ export const AutoOrderSimulator: React.FC<AutoOrderSimulatorProps> = ({
                         </div>
                       </td>
 
-                      {/* [D열] 현재 재고 */}
+                      <td className="py-2.5 px-3 text-center whitespace-nowrap">
+                        {isUrgent && (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-200">
+                            발주 필요 (+{item.orderQty}{item.unit})
+                          </span>
+                        )}
+                        {isWarn && (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200">
+                            재고 주의
+                          </span>
+                        )}
+                        {!isUrgent && !isWarn && (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-100 text-emerald-800">
+                            적정
+                          </span>
+                        )}
+                      </td>
+
+                      {/* 현재 재고 */}
                       <td className="py-2.5 px-3 text-right font-mono font-bold whitespace-nowrap">
                         <span className={`inline-block px-2 py-0.5 rounded border transition-colors ${
                           isUrgent 
                             ? 'text-[#BA1B2D] bg-rose-50 border-rose-300 font-black ring-1 ring-rose-200' 
                             : 'text-slate-900 bg-slate-50 border-slate-200 group-hover:border-rose-200'
                         }`}>
-                          {item.currentStock.toLocaleString()}
+                          {displayedCurrentStock(item).toLocaleString()}
                         </span>
                       </td>
 
                       {/* [E열] 안전 재고 */}
                       <td className="py-2.5 px-3 text-right font-mono font-medium text-slate-600 whitespace-nowrap">
                         <span className="bg-slate-50 px-2 py-0.5 rounded border border-slate-200 group-hover:border-rose-200">
-                          {(item.safetyStock || 30).toLocaleString()}
+                          {displayedSafetyStock(item, selectedModel).toLocaleString()}
                         </span>
                       </td>
 
-                      {/* [F열] 대당 수량 */}
                       <td className="py-2.5 px-3 text-center whitespace-nowrap">
-                        {selectedModel === 'outdoor' && (
-                          <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-200">
-                            {item.usedIn.outdoor} {item.unit}
-                          </span>
-                        )}
-                        {selectedModel === 'indoor' && (
-                          <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-rose-100 text-rose-900 border border-rose-200">
-                            {item.usedIn.indoor} {item.unit}
-                          </span>
-                        )}
-                        {selectedModel === 'mobile' && (
-                          <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-200">
-                            {item.usedIn.mobile} {item.unit}
-                          </span>
-                        )}
-                        {selectedModel === 'lsend' && (
-                          <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-indigo-100 text-indigo-900 border border-indigo-200">
-                            {item.usedIn.lsend} {item.unit}
-                          </span>
-                        )}
-                        {selectedModel === 'ALL' && (
-                          <div className="flex items-center justify-center gap-1">
-                            <span 
-                              title={`옥외: ${item.usedIn.outdoor}개`}
-                              className={`w-5 h-5 rounded text-[10px] font-bold flex items-center justify-center ${
-                                item.usedIn.outdoor > 0 ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-300'
-                              }`}
-                            >
-                              옥
-                            </span>
-                            <span 
-                              title={`실내: ${item.usedIn.indoor}개`}
-                              className={`w-5 h-5 rounded text-[10px] font-bold flex items-center justify-center ${
-                                item.usedIn.indoor > 0 ? 'bg-rose-100 text-rose-800' : 'bg-slate-100 text-slate-300'
-                              }`}
-                            >
-                              실
-                            </span>
-                            <span 
-                              title={`이동: ${item.usedIn.mobile}개`}
-                              className={`w-5 h-5 rounded text-[10px] font-bold flex items-center justify-center ${
-                                item.usedIn.mobile > 0 ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-300'
-                              }`}
-                            >
-                              이
-                            </span>
-                            <span 
-                              title={`L.SEND: ${item.usedIn.lsend}개`}
-                              className={`w-5 h-5 rounded text-[10px] font-bold flex items-center justify-center ${
-                                item.usedIn.lsend > 0 ? 'bg-indigo-100 text-indigo-800' : 'bg-slate-100 text-slate-300'
-                              }`}
-                            >
-                              L
-                            </span>
-                          </div>
-                        )}
+                        <MaterialUsedModelsCell item={item} />
                       </td>
+                      {selectedModel !== 'ALL' && (
+                        <td className="py-2.5 px-3 text-center whitespace-nowrap">
+                          {selectedModel === 'outdoor' && (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-200">
+                              {item.usedIn.outdoor} {item.unit}
+                            </span>
+                          )}
+                          {selectedModel === 'indoor' && (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-rose-100 text-rose-900 border border-rose-200">
+                              {item.usedIn.indoor} {item.unit}
+                            </span>
+                          )}
+                          {selectedModel === 'mobile' && (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-200">
+                              {item.usedIn.mobile} {item.unit}
+                            </span>
+                          )}
+                          {selectedModel === 'lsend' && (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-indigo-100 text-indigo-900 border border-indigo-200">
+                              {item.usedIn.lsend} {item.unit}
+                            </span>
+                          )}
+                        </td>
+                      )}
 
                       {/* [G열] 단위 */}
                       <td className="py-2.5 px-2 text-center text-slate-600 font-medium">
@@ -566,26 +524,7 @@ export const AutoOrderSimulator: React.FC<AutoOrderSimulatorProps> = ({
                         )}
                       </td>
 
-                      {/* 재고 상태 배지 */}
-                      <td className="py-2.5 px-3 text-center whitespace-nowrap">
-                        {isUrgent && (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-200">
-                            발주 필요 (+{item.orderQty}{item.unit})
-                          </span>
-                        )}
-                        {isWarn && (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200">
-                            재고 주의
-                          </span>
-                        )}
-                        {!isUrgent && !isWarn && (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-100 text-emerald-800">
-                            적정
-                          </span>
-                        )}
-                      </td>
-
-                      {/* [L열] 비고 */}
+                      {/* 비고 */}
                       <td className="py-2.5 px-3 text-slate-500">
                         <div className="text-[11px] truncate max-w-[140px]" title={item.notes || '-'}>
                           {item.notes || '-'}

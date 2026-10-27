@@ -9,7 +9,31 @@ const MATERIALS_SHEET = '자재관리DB';
 const SUPPLIERS_SHEET = '협력사관리DB';
 
 const MATERIAL_HEADERS = ['recordUuid', 'id', 'json'];
-const SUPPLIER_HEADERS = ['recordUuid', 'id', 'json'];
+/** 협력사관리DB — BOM 탭과 같이 원장에서 바로 읽을 수 있는 표 형식 */
+const SUPPLIER_HEADERS = [
+  'No',
+  '협력사 ID',
+  '협력사명',
+  '담당자',
+  '연락처',
+  '취급 분류',
+  '신뢰등급',
+  '평균조달일(일)',
+  '연결품목수',
+  'recordUuid',
+];
+const SUPPLIER_COL = {
+  NO: 1,
+  ID: 2,
+  NAME: 3,
+  CONTACT: 4,
+  PHONE: 5,
+  CATEGORY: 6,
+  RELIABILITY: 7,
+  LEAD_DAYS: 8,
+  ITEMS_COUNT: 9,
+  RECORD_UUID: 10,
+};
 
 /** 4대 제품 BOM 탭 (원장 시트) */
 const BOM_TABS = [
@@ -92,6 +116,16 @@ function handleAction(action, payload) {
       replaceAllSuppliers_(suppliers);
       return ok('replaceAllSuppliers', { count: suppliers.length });
     }
+    case 'saveLedger': {
+      var saveMaterials = payload.materials || [];
+      var saveSuppliers = payload.suppliers || [];
+      replaceAllMaterials_(saveMaterials);
+      replaceAllSuppliers_(saveSuppliers);
+      return ok('saveLedger', {
+        materialCount: saveMaterials.length,
+        supplierCount: saveSuppliers.length,
+      });
+    }
     default:
       return fail(action, 'Unknown action: ' + action);
   }
@@ -100,7 +134,7 @@ function handleAction(action, payload) {
 function ensureSheets() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   ensureSheetWithHeaders_(ss, MATERIALS_SHEET, MATERIAL_HEADERS);
-  ensureSheetWithHeaders_(ss, SUPPLIERS_SHEET, SUPPLIER_HEADERS);
+  ensureSupplierSheetTable_(ss.getSheetByName(SUPPLIERS_SHEET) || ss.insertSheet(SUPPLIERS_SHEET));
 }
 
 function ensureSheetWithHeaders_(ss, name, headers) {
@@ -119,7 +153,115 @@ function listMaterials_() {
 }
 
 function listSuppliers_() {
-  return readJsonRows_(getSheet_(SUPPLIERS_SHEET));
+  var sheet = getSheet_(SUPPLIERS_SHEET);
+  if (isLegacySupplierJsonSheet_(sheet)) {
+    return readJsonRows_(sheet);
+  }
+  return readSupplierTableRows_(sheet);
+}
+
+function isLegacySupplierJsonSheet_(sheet) {
+  var h3 = String(sheet.getRange(1, 3).getValue() || '').trim();
+  return h3 === 'json';
+}
+
+function ensureSupplierSheetTable_(sheet) {
+  if (!sheet) return;
+  if (isLegacySupplierJsonSheet_(sheet)) return;
+  var headerCell = String(sheet.getRange(1, 1).getValue() || '').trim();
+  if (headerCell !== 'No') {
+    sheet.getRange(1, 1, 1, SUPPLIER_HEADERS.length).setValues([SUPPLIER_HEADERS]);
+  }
+  sheet.setFrozenRows(1);
+  var headerRange = sheet.getRange(1, 1, 1, SUPPLIER_HEADERS.length);
+  headerRange.setFontWeight('bold');
+  headerRange.setBackground('#e8eaed');
+}
+
+function supplierToRowValues_(no, supplier) {
+  var recordUuid = supplier.recordUuid || Utilities.getUuid();
+  var id = String(supplier.id || '');
+  return [
+    Number(no) || 0,
+    id,
+    String(supplier.name || ''),
+    String(supplier.contactPerson || ''),
+    String(supplier.phone || ''),
+    String(supplier.category || ''),
+    String(supplier.reliability || ''),
+    Number(supplier.leadTimeAvgDays || 0),
+    Number(supplier.itemsCount || 0),
+    recordUuid,
+  ];
+}
+
+function rowValuesToSupplier_(row) {
+  var id = String(row[SUPPLIER_COL.ID - 1] || '').trim();
+  if (!id) return null;
+  var recordUuid = String(row[SUPPLIER_COL.RECORD_UUID - 1] || '').trim();
+  return {
+    recordUuid: recordUuid || Utilities.getUuid(),
+    id: id,
+    name: String(row[SUPPLIER_COL.NAME - 1] || '').trim(),
+    contactPerson: String(row[SUPPLIER_COL.CONTACT - 1] || '').trim(),
+    phone: String(row[SUPPLIER_COL.PHONE - 1] || '').trim(),
+    category: String(row[SUPPLIER_COL.CATEGORY - 1] || '').trim(),
+    reliability: String(row[SUPPLIER_COL.RELIABILITY - 1] || 'B').trim(),
+    leadTimeAvgDays: Number(row[SUPPLIER_COL.LEAD_DAYS - 1] || 0),
+    itemsCount: Number(row[SUPPLIER_COL.ITEMS_COUNT - 1] || 0),
+  };
+}
+
+function readSupplierTableRows_(sheet) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+  var width = SUPPLIER_HEADERS.length;
+  var values = sheet.getRange(2, 1, lastRow - 1, width).getValues();
+  var items = [];
+  values.forEach(function (row) {
+    var supplier = rowValuesToSupplier_(row);
+    if (supplier) items.push(supplier);
+  });
+  items.sort(function (a, b) {
+    return String(a.id).localeCompare(String(b.id));
+  });
+  return items;
+}
+
+function findSupplierRowIndex_(sheet, recordUuid, id) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return -1;
+  var width = SUPPLIER_HEADERS.length;
+  var values = sheet.getRange(2, 1, lastRow, width).getValues();
+  for (var i = 0; i < values.length; i += 1) {
+    var row = values[i];
+    var rowUuid = String(row[SUPPLIER_COL.RECORD_UUID - 1] || '').trim();
+    var rowId = String(row[SUPPLIER_COL.ID - 1] || '').trim();
+    if (recordUuid && rowUuid === recordUuid) return i + 2;
+    if (id && rowId === String(id)) return i + 2;
+  }
+  return -1;
+}
+
+function writeSupplierTableRow_(sheet, rowIndex, no, supplier) {
+  var rowValues = supplierToRowValues_(no, supplier);
+  if (rowIndex === -1) {
+    sheet.appendRow(rowValues);
+  } else {
+    sheet.getRange(rowIndex, 1, 1, SUPPLIER_HEADERS.length).setValues([rowValues]);
+  }
+}
+
+function nextSupplierNo_(sheet) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return 1;
+  var values = sheet.getRange(2, 1, lastRow, 1).getValues();
+  var maxNo = 0;
+  values.forEach(function (row) {
+    var n = Number(row[0]);
+    if (!isNaN(n) && n > maxNo) maxNo = n;
+  });
+  return maxNo + 1;
 }
 
 function readJsonRows_(sheet) {
@@ -196,24 +338,86 @@ function deleteMaterial_(id, recordUuid) {
 
 function upsertSupplier_(supplier) {
   if (!supplier) throw new Error('supplier is required');
-  const sheet = getSheet_(SUPPLIERS_SHEET);
-  const recordUuid = supplier.recordUuid || Utilities.getUuid();
-  const id = String(supplier.id || '');
-  const payload = Object.assign({}, supplier, { recordUuid: recordUuid, id: id, updatedAt: supplier.updatedAt || new Date().toISOString() });
-  const rowIndex = findRowIndex_(sheet, recordUuid, id);
-  writeJsonRow_(sheet, rowIndex, recordUuid, id, payload);
+  var sheet = getSheet_(SUPPLIERS_SHEET);
+  if (isLegacySupplierJsonSheet_(sheet)) {
+    migrateSupplierSheetToTable_(sheet);
+  }
+  ensureSupplierSheetTable_(sheet);
+  var recordUuid = supplier.recordUuid || Utilities.getUuid();
+  var id = String(supplier.id || '');
+  var payload = Object.assign({}, supplier, {
+    recordUuid: recordUuid,
+    id: id,
+    updatedAt: supplier.updatedAt || new Date().toISOString(),
+  });
+  var rowIndex = findSupplierRowIndex_(sheet, recordUuid, id);
+  var no = rowIndex > 0 ? sheet.getRange(rowIndex, 1).getValue() : nextSupplierNo_(sheet);
+  writeSupplierTableRow_(sheet, rowIndex, no, payload);
   return payload;
 }
 
 function deleteSupplier_(id, recordUuid) {
-  deleteRow_(getSheet_(SUPPLIERS_SHEET), recordUuid, id != null ? String(id) : '');
+  var sheet = getSheet_(SUPPLIERS_SHEET);
+  var idText = id != null ? String(id).trim() : '';
+  var uuidText = recordUuid != null ? String(recordUuid).trim() : '';
+  var current = listSuppliers_();
+  var next = current.filter(function (supplier) {
+    var sameUuid = uuidText && String(supplier.recordUuid || '') === uuidText;
+    var sameId = idText && String(supplier.id || '') === idText;
+    return !sameUuid && !sameId;
+  });
+  if (next.length === current.length) {
+    var fallbackRow = findSupplierRowAnywhere_(sheet, uuidText, idText);
+    if (fallbackRow === -1) {
+      throw new Error('원장에서 협력사를 찾지 못했습니다 (' + (idText || uuidText) + ')');
+    }
+    clearOrDeleteRow_(sheet, fallbackRow);
+    return;
+  }
+  replaceAllSuppliers_(next);
+}
+
+function findSupplierRowAnywhere_(sheet, recordUuid, id) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return -1;
+  var width = Math.max(sheet.getLastColumn(), SUPPLIER_HEADERS.length, 3);
+  var numRows = lastRow - 1;
+  var values = sheet.getRange(2, 1, numRows, width).getValues();
+  for (var i = 0; i < values.length; i += 1) {
+    var row = values[i];
+    var legacyUuid = String(row[0] || '').trim();
+    var legacyId = String(row[1] || '').trim();
+    var tableId = String(row[SUPPLIER_COL.ID - 1] || '').trim();
+    var tableUuid = String(row[SUPPLIER_COL.RECORD_UUID - 1] || '').trim();
+    if (recordUuid && (legacyUuid === recordUuid || tableUuid === recordUuid)) return i + 2;
+    if (id && (legacyId === id || tableId === id)) return i + 2;
+  }
+  return -1;
+}
+
+function clearOrDeleteRow_(sheet, rowIndex) {
+  var lastCol = Math.max(sheet.getLastColumn(), 1);
+  try {
+    sheet.deleteRow(rowIndex);
+  } catch (err) {
+    sheet.getRange(rowIndex, 1, 1, lastCol).clearContent();
+  }
+}
+
+function migrateSupplierSheetToTable_(sheet) {
+  var legacy = readJsonRows_(sheet);
+  ensureSupplierSheetTable_(sheet);
+  clearDataRows_(sheet);
+  if (!legacy || legacy.length === 0) return;
+  var rows = legacy.map(function (supplier, idx) {
+    return supplierToRowValues_(idx + 1, supplier);
+  });
+  sheet.getRange(2, 1, rows.length, SUPPLIER_HEADERS.length).setValues(rows);
 }
 
 function replaceAllMaterials_(materials) {
   const sheet = getSheet_(MATERIALS_SHEET);
-  clearDataRows_(sheet);
-  if (!materials || materials.length === 0) return;
-  var rows = materials.map(function (material) {
+  var rows = (materials || []).map(function (material) {
     var recordUuid = material.recordUuid || Utilities.getUuid();
     var id = Number(material.id);
     var payload = Object.assign({}, material, {
@@ -223,15 +427,17 @@ function replaceAllMaterials_(materials) {
     });
     return [recordUuid, id, JSON.stringify(payload)];
   });
-  sheet.getRange(2, 1, rows.length, 3).setValues(rows);
+  writeBlock_(sheet, 2, rows, 3);
   rebuildAllBomTabsFromMaterials_(materials);
 }
 
 function replaceAllSuppliers_(suppliers) {
-  const sheet = getSheet_(SUPPLIERS_SHEET);
-  clearDataRows_(sheet);
-  if (!suppliers || suppliers.length === 0) return;
-  var rows = suppliers.map(function (supplier) {
+  var sheet = getSheet_(SUPPLIERS_SHEET);
+  if (isLegacySupplierJsonSheet_(sheet)) {
+    sheet.getRange(1, 1, 1, 3).clearContent();
+  }
+  ensureSupplierSheetTable_(sheet);
+  var rows = (suppliers || []).map(function (supplier, idx) {
     var recordUuid = supplier.recordUuid || Utilities.getUuid();
     var id = String(supplier.id || '');
     var payload = Object.assign({}, supplier, {
@@ -239,9 +445,29 @@ function replaceAllSuppliers_(suppliers) {
       id: id,
       updatedAt: supplier.updatedAt || new Date().toISOString(),
     });
-    return [recordUuid, id, JSON.stringify(payload)];
+    return supplierToRowValues_(idx + 1, payload);
   });
-  sheet.getRange(2, 1, rows.length, 3).setValues(rows);
+  writeBlock_(sheet, 2, rows, SUPPLIER_HEADERS.length);
+}
+
+function writeBlock_(sheet, startRow, rows, numCols) {
+  var lastRow = sheet.getLastRow();
+  var count = rows ? rows.length : 0;
+  if (count > 0) {
+    sheet.getRange(startRow, 1, count, numCols).setValues(rows);
+  }
+  var writtenLast = startRow - 1 + count;
+  if (lastRow > writtenLast) {
+    var extra = lastRow - writtenLast;
+    sheet.getRange(writtenLast + 1, 1, extra, Math.max(sheet.getLastColumn(), numCols)).clearContent();
+    if (writtenLast >= 1 && extra > 0) {
+      try {
+        sheet.deleteRows(writtenLast + 1, extra);
+      } catch (err) {
+        // 고정 행만 남는 경우에는 내용만 비워 둔다.
+      }
+    }
+  }
 }
 
 function getSheet_(name) {
@@ -278,10 +504,26 @@ function deleteRow_(sheet, recordUuid, id) {
   }
 }
 
+/** 고정 헤더(1행) 아래 데이터만 비움. 비고정 행을 전부 deleteRows 하면 Sheets 오류가 납니다. */
 function clearDataRows_(sheet) {
   var lastRow = sheet.getLastRow();
-  if (lastRow > 1) {
-    sheet.deleteRows(2, lastRow - 1);
+  if (lastRow <= 1) return;
+  var lastCol = Math.max(sheet.getLastColumn(), 1);
+  var numRows = lastRow - 1;
+  sheet.getRange(2, 1, numRows, lastCol).clearContent();
+  if (lastRow > 2) {
+    sheet.deleteRows(3, lastRow - 2);
+  }
+}
+
+function clearBomDataRows_(sheet, headerRow) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow <= headerRow) return;
+  var width = Math.max(sheet.getLastColumn(), BOM_ROW_WIDTH);
+  var dataRows = lastRow - headerRow;
+  sheet.getRange(headerRow + 1, 1, dataRows, width).clearContent();
+  if (dataRows > 1) {
+    sheet.deleteRows(headerRow + 2, dataRows - 1);
   }
 }
 
@@ -415,10 +657,6 @@ function rebuildAllBomTabsFromMaterials_(materials) {
     var sheet = ss.getSheetByName(tab.name);
     if (!sheet) return;
     var headerRow = findBomHeaderRow_(sheet);
-    var lastRow = sheet.getLastRow();
-    if (lastRow > headerRow) {
-      sheet.deleteRows(headerRow + 1, lastRow - headerRow);
-    }
     var rows = [];
     var no = 1;
     list.forEach(function (material) {
@@ -429,9 +667,7 @@ function rebuildAllBomTabsFromMaterials_(materials) {
       no += 1;
       rows.push(rowValues);
     });
-    if (rows.length > 0) {
-      sheet.getRange(headerRow + 1, 1, rows.length, BOM_ROW_WIDTH).setValues(rows);
-    }
+    writeBlock_(sheet, headerRow + 1, rows, BOM_ROW_WIDTH);
   });
 }
 

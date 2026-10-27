@@ -4,7 +4,9 @@ import {
   Plus, 
   Search, 
   Edit2, 
-  Trash2, 
+  Trash2,
+  Loader2,
+  Factory,
   AlertCircle, 
   CheckCircle2, 
   X, 
@@ -14,12 +16,22 @@ import {
   DollarSign
 } from 'lucide-react';
 import { MaterialItem, MainCategory, CommonalityLevel } from '../types/inventory';
+import { displayedCurrentStock, displayedSafetyStock, stockStatus } from '../utils/stockDisplay';
+import {
+  computeProductionConsumption,
+  PRODUCTION_MODEL_LABELS,
+  ProductionLinePreview,
+  ProductionModel,
+} from '../utils/productionConsumption';
+import { MaterialUsedModelsCell } from './MaterialUsedModelsCell';
 
 interface MaterialManagerProps {
   materials: MaterialItem[];
   onAddMaterial: (material: MaterialItem) => void;
   onUpdateMaterial: (material: MaterialItem) => void;
-  onDeleteMaterial: (id: number) => void;
+  onDeleteMaterials: (ids: number[]) => void;
+  onApplyProductionConsumption?: (model: ProductionModel, productionUnits: number) => Promise<void>;
+  isProductionSaving?: boolean;
   initialEditingItem?: MaterialItem | null;
   onClearInitialEditingItem?: () => void;
 }
@@ -37,7 +49,9 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
   materials,
   onAddMaterial,
   onUpdateMaterial,
-  onDeleteMaterial,
+  onDeleteMaterials,
+  onApplyProductionConsumption,
+  isProductionSaving = false,
   initialEditingItem,
   onClearInitialEditingItem,
 }) => {
@@ -52,6 +66,19 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
   // Delete confirm modal state (in-app modal to prevent sandbox iframe from blocking window.confirm)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [itemsPendingDelete, setItemsPendingDelete] = useState<MaterialItem[] | null>(null);
+  const [productionQty, setProductionQty] = useState<number>(0);
+  const [productionEntryOpen, setProductionEntryOpen] = useState(false);
+  const [productionPreview, setProductionPreview] = useState<{
+    model: ProductionModel;
+    units: number;
+    lines: ProductionLinePreview[];
+  } | null>(null);
+
+  const isModelTab =
+    selectedModel === 'outdoor' ||
+    selectedModel === 'indoor' ||
+    selectedModel === 'mobile' ||
+    selectedModel === 'lsend';
 
   // Open edit modal if requested from another screen
   React.useEffect(() => {
@@ -156,6 +183,7 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
       notes: '',
       usedIn: buildDefaultUsedIn(selectedModel),
       currentStock: 100,
+      safetyStock: 30,
       reorderPoint: 40,
       leadTimeDays: 7,
       moq: 10,
@@ -163,12 +191,12 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
     setIsModalOpen(true);
   };
 
-  // Open edit modal
+  // Open edit modal with the same safety stock the current tab shows
   const handleOpenEditModal = (item: MaterialItem) => {
     setEditingItem(item);
     setFormData({
       ...item,
-      reorderPoint: item.reorderPoint ?? item.safetyStock ?? 30,
+      safetyStock: displayedSafetyStock(item, selectedModel),
       usedIn: { ...item.usedIn },
     });
     setIsModalOpen(true);
@@ -202,11 +230,20 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
     if (usageCount === 4) commonLevel = 'C4';
     else if (usageCount === 3) commonLevel = 'C3';
     else if (usageCount === 2) commonLevel = 'C2';
+    const isCommon = usageCount >= 2;
 
     const dailyUsage = Math.round(((outdoorUsage * 80 + indoorUsage * 150 + mobileUsage * 60 + lsendUsage * 120) / 25) * 10) / 10;
-    const reorderPoint = Number(formData.reorderPoint || 30);
     const leadTimeDays = Number(formData.leadTimeDays || 7);
-    const safetyStock = reorderPoint;
+    const enteredSafety = Number(formData.safetyStock ?? 0);
+    const modelCount = [outdoorUsage, indoorUsage, mobileUsage, lsendUsage].filter((qty) => qty > 0).length;
+    const shownSafety = editingItem ? displayedSafetyStock(editingItem, selectedModel) : enteredSafety;
+    let safetyStock = enteredSafety;
+    if (editingItem && enteredSafety === shownSafety) {
+      safetyStock = Number(editingItem.safetyStock) || 0;
+    } else if (selectedModel === 'ALL' && modelCount > 1) {
+      safetyStock = Math.round(enteredSafety / modelCount);
+    }
+    const reorderPoint = editingItem ? editingItem.reorderPoint : safetyStock;
 
     const category = (formData.category || 'EL') as MainCategory;
     const categoryName = CATEGORY_NAMES[category];
@@ -232,7 +269,7 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
           mobile: mobileUsage,
           lsend: lsendUsage,
         },
-        isCommon: usageCount >= 2,
+        isCommon,
         commonLevel,
         currentStock: Number(formData.currentStock || 0),
         safetyStock,
@@ -266,7 +303,7 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
           mobile: mobileUsage,
           lsend: lsendUsage,
         },
-        isCommon: usageCount >= 2,
+        isCommon,
         commonLevel,
         currentStock: Number(formData.currentStock || 0),
         safetyStock,
@@ -316,7 +353,7 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
 
   const handleConfirmDelete = () => {
     if (!itemsPendingDelete?.length) return;
-    itemsPendingDelete.forEach((item) => onDeleteMaterial(item.id));
+    onDeleteMaterials(itemsPendingDelete.map((item) => item.id));
     setSelectedIds((prev) => {
       const next = new Set(prev);
       itemsPendingDelete.forEach((item) => next.delete(item.id));
@@ -327,6 +364,39 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
 
   const handleCancelDelete = () => {
     setItemsPendingDelete(null);
+  };
+
+  const handleOpenProductionPreview = () => {
+    if (!isModelTab || !onApplyProductionConsumption) return;
+    const units = Math.floor(Number(productionQty) || 0);
+    if (units <= 0) {
+      window.alert('생산 수량(완제품 대수)을 1 이상 입력해 주세요.');
+      return;
+    }
+    const lines = computeProductionConsumption(materials, selectedModel, units);
+    if (lines.length === 0) {
+      window.alert('이 모델 BOM에 차감할 자재가 없습니다.');
+      return;
+    }
+    setProductionEntryOpen(false);
+    setProductionPreview({ model: selectedModel, units, lines });
+  };
+
+  const handleOpenProductionEntry = () => {
+    if (!isModelTab || !onApplyProductionConsumption) return;
+    setProductionQty(0);
+    setProductionEntryOpen(true);
+  };
+
+  const handleConfirmProduction = async () => {
+    if (!productionPreview || !onApplyProductionConsumption) return;
+    try {
+      await onApplyProductionConsumption(productionPreview.model, productionPreview.units);
+      setProductionPreview(null);
+      setProductionQty(0);
+    } catch {
+      // App에서 토스트 처리
+    }
   };
 
   return (
@@ -460,32 +530,46 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2 text-xs text-slate-500 shrink-0">
-            <span>조회 결과: <strong className="text-slate-800">{filteredMaterials.length}</strong>종</span>
-            {(searchTerm || selectedCategory !== 'ALL' || selectedModel !== 'ALL') && (
+          {(searchTerm || selectedCategory !== 'ALL' || selectedModel !== 'ALL') && (
+            <div className="flex items-center gap-2 text-xs text-slate-500 shrink-0">
               <button
                 onClick={() => {
                   setSearchTerm('');
                   setSelectedCategory('ALL');
                   setSelectedModel('ALL');
                 }}
-                className="text-[#BA1B2D] hover:underline font-medium ml-1"
+                className="text-[#BA1B2D] hover:underline font-medium"
               >
                 필터 초기화
               </button>
-            )}
-          </div>
+            </div>
+          )}
         </div>
 
-        <div className="flex justify-end">
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {isModelTab && onApplyProductionConsumption && (
+            <button
+              type="button"
+              disabled={isProductionSaving}
+              onClick={handleOpenProductionEntry}
+              className="inline-flex items-center gap-1.5 rounded-xl border px-3.5 py-2 text-xs font-bold transition-colors disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 enabled:border-emerald-200 enabled:bg-emerald-50 enabled:text-emerald-900 enabled:hover:bg-emerald-100 enabled:hover:border-emerald-300 shadow-xs"
+            >
+              {isProductionSaving ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Factory className="h-3.5 w-3.5" />
+              )}
+              제품 생산(자재 수량 반영)
+            </button>
+          )}
           <button
             type="button"
-            disabled={selectedIds.size === 0}
+            disabled={selectedIds.size === 0 || isProductionSaving}
             onClick={() => setItemsPendingDelete(selectedMaterials)}
             className="inline-flex items-center gap-1.5 rounded-xl border px-3.5 py-2 text-xs font-bold transition-colors disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 enabled:border-rose-200 enabled:bg-rose-50 enabled:text-[#BA1B2D] enabled:hover:bg-rose-100"
           >
             <Trash2 className="h-3.5 w-3.5" />
-            내역 삭제
+            항목 삭제
           </button>
         </div>
 
@@ -507,23 +591,13 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
                   <th className="py-3 px-2.5 text-center w-12">No</th>
                   <th className="py-3 px-3 min-w-[160px]">품목명 (더블 클릭 시 편집)</th>
                   <th className="py-3 px-3 min-w-[150px]">규격</th>
+                  <th className="py-3 px-3 text-center min-w-[90px]">재고 상태</th>
                   <th className="py-3 px-3 text-right min-w-[90px]">현재 재고</th>
                   <th className="py-3 px-3 text-right min-w-[80px]">안전 재고</th>
-                  <th className="py-3 px-3 text-center min-w-[100px]">
-                    {selectedModel === 'outdoor' && (
-                      <span className="text-emerald-800 font-bold">대당 수량 (옥외)</span>
-                    )}
-                    {selectedModel === 'indoor' && (
-                      <span className="text-[#BA1B2D] font-bold">대당 수량 (실내)</span>
-                    )}
-                    {selectedModel === 'mobile' && (
-                      <span className="text-amber-800 font-bold">대당 수량 (이동)</span>
-                    )}
-                    {selectedModel === 'lsend' && (
-                      <span className="text-indigo-800 font-bold">대당 수량 (L.SEND)</span>
-                    )}
-                    {selectedModel === 'ALL' && '대당 수량'}
-                  </th>
+                  <th className="py-3 px-3 text-center min-w-[95px]">사용 모델</th>
+                  {selectedModel !== 'ALL' && (
+                    <th className="py-3 px-3 text-center min-w-[90px]">대당 수량</th>
+                  )}
                   <th className="py-3 px-2 text-center w-14">단위</th>
                   <th className="py-3 px-3 text-right min-w-[85px]">단가</th>
                   <th className="py-3 px-2.5 text-center min-w-[80px]">조달 소요일</th>
@@ -535,12 +609,22 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
               <tbody className="divide-y divide-slate-100">
                 {filteredMaterials.length === 0 ? (
                   <tr>
-                    <td colSpan={13} className="text-center py-8 text-slate-400">
+                    <td colSpan={selectedModel === 'ALL' ? 14 : 15} className="text-center py-8 text-slate-400">
                       검색 조건과 일치하는 자재가 없습니다.
                     </td>
                   </tr>
                 ) : (
-                  filteredMaterials.map((item, idx) => (
+                  filteredMaterials.map((item, idx) => {
+                    const rowStatus = stockStatus(
+                      displayedCurrentStock(item),
+                      displayedSafetyStock(item, selectedModel),
+                    );
+                    const moq = item.moq || 10;
+                    const shortage = displayedSafetyStock(item, selectedModel) - displayedCurrentStock(item);
+                    const orderQty = rowStatus === 'ORDER_NEEDED'
+                      ? Math.max(moq, shortage > 0 ? Math.ceil(shortage / moq) * moq : moq)
+                      : 0;
+                    return (
                     <tr 
                       key={item.id} 
                       onClick={() => setSelectedItemId(item.id)}
@@ -588,83 +672,71 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
                         <div className="font-medium text-slate-800">{item.spec}</div>
                       </td>
 
-                      {/* [D열] 현재 재고 */}
+                      <td className="py-2.5 px-3 text-center whitespace-nowrap">
+                        {rowStatus === 'ORDER_NEEDED' && (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-200">
+                            발주 필요 (+{orderQty}{item.unit})
+                          </span>
+                        )}
+                        {rowStatus === 'WARNING' && (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200">
+                            재고 주의
+                          </span>
+                        )}
+                        {rowStatus === 'NORMAL' && (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-100 text-emerald-800">
+                            적정
+                          </span>
+                        )}
+                      </td>
+
+                      {/* 현재 재고 */}
                       <td className="py-2.5 px-3 text-right font-mono font-bold whitespace-nowrap">
                         <span className={`inline-block px-2 py-0.5 rounded border transition-colors ${
-                          item.currentStock <= (item.safetyStock || 30) 
-                            ? 'text-[#BA1B2D] bg-rose-50 border-rose-300 ring-1 ring-rose-200' 
-                            : 'text-slate-900 bg-slate-50 border-slate-200 group-hover:border-rose-200'
+                          rowStatus === 'ORDER_NEEDED'
+                            ? 'text-[#BA1B2D] bg-rose-50 border-rose-300 ring-1 ring-rose-200'
+                            : rowStatus === 'WARNING'
+                              ? 'text-amber-800 bg-amber-50 border-amber-300'
+                              : 'text-slate-900 bg-slate-50 border-slate-200 group-hover:border-rose-200'
                         }`}>
-                          {item.currentStock.toLocaleString()}
+                          {displayedCurrentStock(item).toLocaleString()}
                         </span>
                       </td>
 
                       {/* [E열] 안전 재고 */}
                       <td className="py-2.5 px-3 text-right font-mono font-medium text-slate-600 whitespace-nowrap">
                         <span className="bg-slate-50 px-2 py-0.5 rounded border border-slate-200 group-hover:border-rose-200">
-                          {(item.safetyStock || 30).toLocaleString()}
+                          {displayedSafetyStock(item, selectedModel).toLocaleString()}
                         </span>
                       </td>
 
-                      {/* [F열] 대당 수량 */}
                       <td className="py-2.5 px-3 text-center whitespace-nowrap">
-                        {selectedModel === 'outdoor' && (
-                          <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-200">
-                            {item.usedIn.outdoor} {item.unit}
-                          </span>
-                        )}
-                        {selectedModel === 'indoor' && (
-                          <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-rose-100 text-rose-900 border border-rose-200">
-                            {item.usedIn.indoor} {item.unit}
-                          </span>
-                        )}
-                        {selectedModel === 'mobile' && (
-                          <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-200">
-                            {item.usedIn.mobile} {item.unit}
-                          </span>
-                        )}
-                        {selectedModel === 'lsend' && (
-                          <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-indigo-100 text-indigo-900 border border-indigo-200">
-                            {item.usedIn.lsend} {item.unit}
-                          </span>
-                        )}
-                        {selectedModel === 'ALL' && (
-                          <div className="flex items-center justify-center gap-1">
-                            <span 
-                              title={`옥외보관함: ${item.usedIn.outdoor}개`}
-                              className={`w-5 h-5 rounded text-[10px] font-bold flex items-center justify-center ${
-                                item.usedIn.outdoor > 0 ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-300'
-                              }`}
-                            >
-                              옥
-                            </span>
-                            <span 
-                              title={`실내보관함: ${item.usedIn.indoor}개`}
-                              className={`w-5 h-5 rounded text-[10px] font-bold flex items-center justify-center ${
-                                item.usedIn.indoor > 0 ? 'bg-rose-100 text-rose-800' : 'bg-slate-100 text-slate-300'
-                              }`}
-                            >
-                              실
-                            </span>
-                            <span 
-                              title={`이동형보관함: ${item.usedIn.mobile}개`}
-                              className={`w-5 h-5 rounded text-[10px] font-bold flex items-center justify-center ${
-                                item.usedIn.mobile > 0 ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-300'
-                              }`}
-                            >
-                              이
-                            </span>
-                            <span 
-                              title={`L.SEND case: ${item.usedIn.lsend}개`}
-                              className={`w-5 h-5 rounded text-[10px] font-bold flex items-center justify-center ${
-                                item.usedIn.lsend > 0 ? 'bg-indigo-100 text-indigo-800' : 'bg-slate-100 text-slate-300'
-                              }`}
-                            >
-                              L
-                            </span>
-                          </div>
-                        )}
+                        <MaterialUsedModelsCell item={item} />
                       </td>
+                      {selectedModel !== 'ALL' && (
+                        <td className="py-2.5 px-3 text-center whitespace-nowrap">
+                          {selectedModel === 'outdoor' && (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-200">
+                              {item.usedIn.outdoor} {item.unit}
+                            </span>
+                          )}
+                          {selectedModel === 'indoor' && (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-rose-100 text-rose-900 border border-rose-200">
+                              {item.usedIn.indoor} {item.unit}
+                            </span>
+                          )}
+                          {selectedModel === 'mobile' && (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-200">
+                              {item.usedIn.mobile} {item.unit}
+                            </span>
+                          )}
+                          {selectedModel === 'lsend' && (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold bg-indigo-100 text-indigo-900 border border-indigo-200">
+                              {item.usedIn.lsend} {item.unit}
+                            </span>
+                          )}
+                        </td>
+                      )}
 
                       {/* [G열] 단위 */}
                       <td className="py-2.5 px-2 text-center text-slate-600 font-medium">
@@ -702,7 +774,8 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
                       </td>
 
                     </tr>
-                  ))
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -713,34 +786,28 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
       {/* 등록 및 수정 모달 */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6 border border-slate-200">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3 mb-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[calc(100vh-2rem)] overflow-hidden border border-slate-200 flex flex-col">
+            <div className="flex items-center justify-between border-b border-slate-100 px-6 py-4 shrink-0">
               <div className="flex items-center gap-2.5">
                 <div className="p-1.5 rounded-lg bg-rose-50 text-[#BA1B2D]">
                   <Package className="w-5 h-5" />
                 </div>
-                <div>
-                  <h3 className="text-base font-bold text-slate-900">
-                    {editingItem ? `자재 정보 및 재고 수정 (${editingItem.name})` : '신규 관리 대상 자재 등록'}
-                  </h3>
-                  {editingItem && (
-                    <p className="text-[11px] text-slate-500 mt-0.5">
-                      수정 후 <strong>[저장]</strong>하면 변경되며, <strong>[취소]</strong> 시 기존 데이터가 유지됩니다.
-                    </p>
-                  )}
-                </div>
+                <h3 className="text-base font-bold text-slate-900">
+                  {editingItem ? '자재 정보 및 재고 수정' : '신규 관리 대상 자재 등록'}
+                </h3>
               </div>
               <button
                 type="button"
                 onClick={handleCancel}
                 className="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
-                title="닫기 (취소)"
+                title="닫기"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleSubmit} className="space-y-4 text-xs">
+            <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col text-xs">
+              <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-4">
               {/* 기본 정보 */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
@@ -769,7 +836,6 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
                     onChange={(e) => setFormData({ ...formData, spec: e.target.value })}
                     className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-[#BA1B2D]"
                   />
-                  <span className="text-[10px] text-slate-400 block mt-0.5">※ 자재 목록 표의 [규격 / 상세 사양] 열에 표시됩니다. (예: 500mm로 사양 변경 시 여기에 입력)</span>
                 </div>
               </div>
 
@@ -861,7 +927,7 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
               {/* 4대 제품별 대당 투입 수량 (BOM) */}
               <div className="p-3 bg-rose-50/50 rounded-xl border border-rose-200 space-y-2">
                 <span className="font-bold text-rose-950 block">
-                  4대 제품별 완제품 1대당 소요 수량 (부품 전개 기준)
+                  4대 제품별 완제품 1대당 소요 수량
                 </span>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                   <div className="bg-white p-2 rounded-lg border border-rose-100">
@@ -921,16 +987,11 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
 
               {/* 재고 및 발주 관리 수치 */}
               <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-slate-800 text-xs">창고 재고 및 안전재고 설정 (원장 구글 시트 실시간 연동)</span>
-                  <span className="text-[11px] text-[#BA1B2D] font-semibold bg-rose-50 px-2 py-0.5 rounded border border-rose-200">
-                    원장 시트 4대 탭(D·E열) 자동 반영
-                  </span>
-                </div>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <span className="font-bold text-slate-800 text-xs block">창고 재고 및 안전재고 설정</span>
+                <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="font-bold text-slate-800 block mb-1">
-                      현재 창고 재고 <span className="text-rose-500">*</span>
+                      현 재고 <span className="text-rose-500">*</span>
                     </label>
                     <input
                       type="number"
@@ -940,28 +1001,22 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
                       onChange={(e) => setFormData({ ...formData, currentStock: Number(e.target.value) })}
                       className="w-full px-3 py-2 border-2 border-slate-300 rounded-lg text-sm font-bold text-slate-900 bg-white focus:outline-hidden focus:border-[#BA1B2D] focus:ring-2 focus:ring-red-500/20"
                     />
-                    <span className="text-[10px] text-slate-500 block mt-1">※ 원장 구글 시트 [현재 재고] 열에 기록</span>
                   </div>
 
                   <div>
                     <label className="font-bold text-rose-950 block mb-1">
-                      안전 재고 (재발주점) <span className="text-rose-500">*</span>
+                      안전 재고 <span className="text-rose-500">*</span>
                     </label>
                     <input
                       type="number"
                       min="0"
                       required
-                      value={formData.reorderPoint ?? formData.safetyStock ?? 30}
-                      onChange={(e) => {
-                        const val = Number(e.target.value);
-                        setFormData({ ...formData, reorderPoint: val, safetyStock: val });
-                      }}
+                      value={formData.safetyStock ?? 0}
+                      onChange={(e) => setFormData({ ...formData, safetyStock: Number(e.target.value) })}
                       className="w-full px-3 py-2 border-2 border-rose-300 bg-rose-50/60 rounded-lg text-sm font-bold text-[#BA1B2D] focus:outline-hidden focus:border-[#BA1B2D] focus:ring-2 focus:ring-red-500/20"
                       placeholder="예: 30"
                     />
-                    <span className="text-[10px] text-rose-600 block mt-1">※ 원장 구글 시트 [안전 재고] 열에 기록</span>
                   </div>
-                  <span className="text-[10px] text-slate-500 block mt-0.5">이 수량 이하 시 발주 알림</span>
                 </div>
 
                 <div>
@@ -976,7 +1031,6 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
                     onChange={(e) => setFormData({ ...formData, leadTimeDays: Number(e.target.value) })}
                     className="w-full px-3 py-1.5 border border-slate-300 rounded-lg font-semibold"
                   />
-                  <span className="text-[10px] text-slate-500 block mt-0.5">발주 후 입고 소요일</span>
                 </div>
 
                 <div>
@@ -992,7 +1046,7 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
               </div>
 
               <div>
-                <label className="font-semibold text-slate-700 block mb-1">관리 참고사항 및 비고</label>
+                <label className="font-semibold text-slate-700 block mb-1">비고</label>
                 <input
                   type="text"
                   placeholder="예: 유명전자 직납, 롤러형 스위치"
@@ -1000,22 +1054,22 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
                   onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg"
                 />
-                <span className="text-[10px] text-slate-400 block mt-0.5">※ 자재 목록 표의 [품목명] 하단 [비고] 영역에 함께 표시됩니다.</span>
+              </div>
               </div>
 
-              <div className="pt-4 border-t border-slate-100 flex items-center justify-end gap-2.5">
+              <div className="shrink-0 border-t border-slate-100 px-6 py-4 flex items-center justify-end gap-2.5 bg-white">
                 <button
                   type="button"
                   onClick={handleCancel}
                   className="px-4 py-2.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors cursor-pointer"
                 >
-                  취소 (기존 데이터 유지)
+                  취소
                 </button>
                 <button
                   type="submit"
                   className="px-5 py-2.5 text-xs font-bold text-white bg-[#BA1B2D] hover:bg-[#a01625] rounded-xl shadow-xs shadow-red-600/20 transition-all cursor-pointer"
                 >
-                  {editingItem ? '수정 내용 저장' : '신규 자재 등록'}
+                  {editingItem ? '저장' : '신규 자재 등록'}
                 </button>
               </div>
             </form>
@@ -1023,6 +1077,166 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
         </div>
       )}
       {/* 등록 및 수정 모달 종료 */}
+      {productionEntryOpen && isModelTab && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => !isProductionSaving && setProductionEntryOpen(false)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 border border-slate-200"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-2 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200">
+                <Factory className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">제품 생산(자재 수량 반영)</h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {PRODUCTION_MODEL_LABELS[selectedModel]} · 완제품 1대 단위
+                </p>
+              </div>
+            </div>
+            <label className="font-bold text-slate-800 text-xs block mb-1.5">
+              생산 수량 (대) <span className="text-rose-500">*</span>
+            </label>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              autoFocus
+              value={productionQty || ''}
+              onChange={(e) => setProductionQty(Number(e.target.value))}
+              disabled={isProductionSaving}
+              className="w-full px-3 py-2.5 border-2 border-slate-300 rounded-xl text-sm font-bold text-slate-900 bg-white focus:outline-hidden focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+              placeholder="예: 10"
+            />
+            <div className="mt-6 flex items-center justify-end gap-2.5">
+              <button
+                type="button"
+                disabled={isProductionSaving}
+                onClick={() => setProductionEntryOpen(false)}
+                className="px-4 py-2.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors"
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                disabled={isProductionSaving}
+                onClick={handleOpenProductionPreview}
+                className="px-5 py-2.5 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl shadow-xs transition-all"
+              >
+                차감 미리보기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {productionPreview && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => !isProductionSaving && setProductionPreview(null)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl max-w-3xl w-full max-h-[calc(100vh-2rem)] overflow-hidden border border-slate-200 flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-slate-100 px-6 py-4 shrink-0">
+              <div>
+                <h3 className="text-base font-bold text-slate-900">제품 생산 · 자재 차감 미리보기</h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {PRODUCTION_MODEL_LABELS[productionPreview.model]} · 완제품{' '}
+                  <strong className="text-slate-800">{productionPreview.units}대</strong> ·{' '}
+                  {productionPreview.lines.length}종 BOM 반영
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={isProductionSaving}
+                onClick={() => setProductionPreview(null)}
+                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-100"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {productionPreview.lines.some((line) => line.isNegative) && (
+              <div className="mx-6 mt-4 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600" />
+                <p>
+                  차감 후 재고가 <strong>0 미만</strong>인 품목이 있습니다. 정책상 반영은 가능하며, 아래 표에서
+                  강조 표시됩니다.
+                </p>
+              </div>
+            )}
+
+            <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+              <table className="w-full text-left text-xs border-collapse">
+                <thead className="bg-slate-50 text-slate-700 font-semibold border-b border-slate-200 sticky top-0">
+                  <tr>
+                    <th className="py-2 px-2">품목명</th>
+                    <th className="py-2 px-2 text-right">대당</th>
+                    <th className="py-2 px-2 text-right">차감</th>
+                    <th className="py-2 px-2 text-right">출고 전</th>
+                    <th className="py-2 px-2 text-right">출고 후</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {productionPreview.lines.map((line) => (
+                    <tr
+                      key={line.materialId}
+                      className={line.isNegative ? 'bg-rose-50/80' : undefined}
+                    >
+                      <td className="py-2 px-2">
+                        <div className="font-bold text-slate-900">{line.name}</div>
+                        <div className="text-[10px] text-slate-500 truncate max-w-[220px]" title={line.spec}>
+                          {line.spec}
+                        </div>
+                      </td>
+                      <td className="py-2 px-2 text-right font-mono whitespace-nowrap">
+                        {line.perUnitQty} {line.unit}
+                      </td>
+                      <td className="py-2 px-2 text-right font-mono font-bold text-[#BA1B2D] whitespace-nowrap">
+                        −{line.consumeQty.toLocaleString()} {line.unit}
+                      </td>
+                      <td className="py-2 px-2 text-right font-mono whitespace-nowrap">
+                        {line.beforeStock.toLocaleString()}
+                      </td>
+                      <td
+                        className={`py-2 px-2 text-right font-mono font-bold whitespace-nowrap ${
+                          line.isNegative ? 'text-rose-700' : 'text-slate-900'
+                        }`}
+                      >
+                        {line.afterStock.toLocaleString()}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="shrink-0 border-t border-slate-100 px-6 py-4 flex items-center justify-end gap-2.5 bg-white">
+              <button
+                type="button"
+                disabled={isProductionSaving}
+                onClick={() => setProductionPreview(null)}
+                className="px-4 py-2.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors"
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                disabled={isProductionSaving}
+                onClick={handleConfirmProduction}
+                className="inline-flex items-center gap-1.5 px-5 py-2.5 text-xs font-bold text-white bg-[#BA1B2D] hover:bg-[#a01625] rounded-xl shadow-xs transition-all disabled:opacity-60"
+              >
+                {isProductionSaving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                재고 반영
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* 자재 삭제 확인 모달 (iFrame 환경에서도 100% 동작하는 안전한 모달) */}
       {itemsPendingDelete && itemsPendingDelete.length > 0 && (
         <div 

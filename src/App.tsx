@@ -3,26 +3,50 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Navbar, TabType, DbStatus } from './components/Navbar';
 import { MaterialManager } from './components/MaterialManager';
 import { AutoOrderSimulator } from './components/AutoOrderSimulator';
 import { SupplierOrderManager } from './components/SupplierOrderManager';
-import { RAW_MATERIALS_DATA } from './data/materialsData';
-import { MaterialItem } from './types/inventory';
+import { RAW_MATERIALS_DATA, SUPPLIERS_LIST } from './data/materialsData';
+import { MaterialItem, SupplierInfo } from './types/inventory';
+import { SUPPLIERS_STORAGE_KEY } from './constants/ledgerStorage';
 import {
   fetchMaterialsFromLedger,
   upsertMaterialInLedger,
   deleteMaterialInLedger,
   replaceAllMaterialsInLedger,
+  replaceAllSuppliersInLedger,
+  saveLedgerSnapshot,
   GOOGLE_SCRIPT_WEBAPP_URL,
 } from './utils/googleSheetLedger';
-import { CheckCircle2, AlertCircle, RefreshCw, X, Save, Loader2, FileSpreadsheet } from 'lucide-react';
+import { CheckCircle2, AlertCircle, X, FileSpreadsheet } from 'lucide-react';
+import {
+  applyProductionToMaterials,
+  computeProductionConsumption,
+  PRODUCTION_MODEL_LABELS,
+  ProductionModel,
+} from './utils/productionConsumption';
 
 const STORAGE_KEY = 'lucciem_materials_inventory_v3_fact';
 const GOOGLE_SHEET_SETTINGS_STORAGE_KEY = 'lucciem_google_sheet_settings_v1';
 const DEFAULT_GOOGLE_SHEET_URL =
   'https://docs.google.com/spreadsheets/d/1cqYtwVvxJU9UmQ0oHJYMFupGZDae5sN1bh3Grvrt7Xs/edit?usp=sharing';
+
+function loadSuppliersForLedgerSave(): SupplierInfo[] {
+  try {
+    const saved = localStorage.getItem(SUPPLIERS_STORAGE_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved) as SupplierInfo[];
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch {
+    // fallback
+  }
+  return SUPPLIERS_LIST;
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabType>('simulator');
@@ -63,12 +87,22 @@ export default function App() {
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(
     null,
   );
+  const toastTimerRef = useRef<number | null>(null);
 
   const webAppUrl = googleSheetSettings.googleScriptUrl;
 
-  const showToast = (text: string, type: 'success' | 'info' | 'error' = 'info') => {
+  const showToast = (
+    text: string,
+    type: 'success' | 'info' | 'error' = 'info',
+    persist = false,
+  ) => {
+    if (toastTimerRef.current != null) {
+      window.clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
     setToastMessage({ text, type });
-    setTimeout(() => {
+    if (persist) return;
+    toastTimerRef.current = window.setTimeout(() => {
       setToastMessage((prev) => (prev?.text === text ? null : prev));
     }, 4000);
   };
@@ -81,10 +115,13 @@ export default function App() {
     }
   };
 
-  const loadMaterialsFromLedger = useCallback(
+    const loadMaterialsFromLedger = useCallback(
     async (isManualRefresh = false) => {
       try {
         setSheetStatus('loading');
+        if (isManualRefresh) {
+          showToast('원장에서 자재를 불러오는 중입니다.', 'info', true);
+        }
         setSheetMessage('구글 원장 자재관리DB에서 데이터를 불러오는 중...');
 
         const ledgerMaterials = await fetchMaterialsFromLedger(webAppUrl);
@@ -132,11 +169,11 @@ export default function App() {
     };
 
     setMaterials((prev) => {
-      const next = [itemWithTimestamp, ...prev];
+      const next = [...prev, itemWithTimestamp];
       persistMaterialsLocally(next);
       return next;
     });
-    showToast(`신규 자재 '${itemWithTimestamp.name}' 원장에 저장 중...`, 'info');
+    showToast(`신규 자재 '${itemWithTimestamp.name}' 저장 중입니다.`, 'info', true);
 
     try {
       setSheetStatus('syncing');
@@ -144,14 +181,14 @@ export default function App() {
       setMaterials((prev) => {
         const next = prev.map((m) => (m.id === saved.id ? saved : m));
         if (!next.some((m) => m.id === saved.id)) {
-          next.unshift(saved);
+          next.push(saved);
         }
         persistMaterialsLocally(next);
         return next;
       });
       setSheetStatus('connected');
       setSheetMessage(`자재 '${saved.name}' 원장 저장 완료`);
-      showToast(`'${saved.name}' 자재가 자재관리DB 및 해당 모델 BOM 탭에 반영되었습니다.`, 'success');
+      showToast(`'${saved.name}' 자재를 시트에 반영했습니다.`, 'success');
     } catch (err: unknown) {
       console.error('원장 저장 오류:', err);
       setSheetStatus('error');
@@ -173,6 +210,7 @@ export default function App() {
       persistMaterialsLocally(next);
       return next;
     });
+    showToast(`'${itemWithTimestamp.name}' 수정 내용을 저장 중입니다.`, 'info', true);
 
     try {
       setSheetStatus('syncing');
@@ -184,7 +222,7 @@ export default function App() {
       });
       setSheetStatus('connected');
       setSheetMessage(`자재 '${saved.name}' 원장 갱신 완료`);
-      showToast(`'${saved.name}' 정보가 자재관리DB 및 BOM 탭에 반영되었습니다.`, 'success');
+      showToast(`'${saved.name}' 수정 내용을 시트에 반영했습니다.`, 'success');
     } catch (err: unknown) {
       console.error('원장 갱신 오류:', err);
       setSheetStatus('error');
@@ -194,46 +232,76 @@ export default function App() {
     }
   };
 
-  const handleDeleteMaterial = async (id: number) => {
-    const target = materials.find((m) => m.id === id);
+  const handleDeleteMaterials = async (ids: number[]) => {
+    const uniqueIds = [...new Set(ids)];
+    const targets = materials.filter((item) => uniqueIds.includes(item.id));
+    if (targets.length === 0) return;
+
+    const label =
+      targets.length === 1 ? `'${targets[0].name}'` : `${targets.length}건`;
+    showToast(`자재 ${label} 삭제 중입니다.`, 'info', true);
 
     setMaterials((prev) => {
-      const next = prev.filter((m) => m.id !== id);
+      const next = prev.filter((item) => !uniqueIds.includes(item.id));
       persistMaterialsLocally(next);
       return next;
     });
 
     try {
       setSheetStatus('syncing');
-      await deleteMaterialInLedger(webAppUrl, id, target?.recordUuid);
+      for (const target of targets) {
+        await deleteMaterialInLedger(webAppUrl, target.id, target.recordUuid);
+      }
       setSheetStatus('connected');
-      setSheetMessage(`자재 (ID: ${id}) 원장 삭제 완료`);
-      showToast(`자재 '${target?.name || id}'가 원장에서 삭제되었습니다.`, 'info');
+      setSheetMessage(`자재 ${label} 원장 삭제 완료`);
+      showToast(`자재 ${label}을 시트에서 삭제했습니다.`, 'success');
     } catch (err: unknown) {
       console.error('원장 삭제 오류:', err);
       setSheetStatus('error');
       const message = err instanceof Error ? err.message : '삭제 실패';
-      showToast(`원장 삭제 실패: ${message}`, 'error');
+      showToast(`자재 삭제 실패: ${message}`, 'error');
       await loadMaterialsFromLedger(false);
     }
   };
 
   const handleReseedDb = async () => {
     setIsSaving(true);
-    const startTime = Date.now();
     try {
       setSheetStatus('syncing');
-      setSheetMessage(`원장 자재관리DB에 ${materials.length}개 자재 저장 중...`);
-      const savedCount = await replaceAllMaterialsInLedger(webAppUrl, materials);
-
-      const elapsed = Date.now() - startTime;
-      if (elapsed < 800) {
-        await new Promise((r) => setTimeout(r, 800 - elapsed));
+      const suppliersToSave = loadSuppliersForLedgerSave();
+      showToast(
+        `자재 ${materials.length}종·협력사 ${suppliersToSave.length}곳 저장 중입니다.`,
+        'info',
+        true,
+      );
+      setSheetMessage(
+        `원장에 자재 ${materials.length}종·협력사 ${suppliersToSave.length}곳 저장 중...`,
+      );
+      let savedCount = materials.length;
+      let supplierCount = suppliersToSave.length;
+      try {
+        const saved = await saveLedgerSnapshot(webAppUrl, materials, suppliersToSave);
+        savedCount = saved.materialCount;
+        supplierCount = saved.supplierCount;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : '';
+        if (!message.includes('Unknown action')) throw err;
+        const [materialSaved, supplierSaved] = await Promise.all([
+          replaceAllMaterialsInLedger(webAppUrl, materials),
+          replaceAllSuppliersInLedger(webAppUrl, suppliersToSave),
+        ]);
+        savedCount = materialSaved;
+        supplierCount = supplierSaved;
       }
 
       setSheetStatus('connected');
-      setSheetMessage(`원장 자재관리DB에 ${savedCount}종 자재 저장 완료`);
-      showToast(`자재관리DB 및 4대 BOM 탭에 ${savedCount}개 자재를 반영했습니다.`, 'success');
+      setSheetMessage(
+        `원장 저장 완료 — 자재 ${savedCount}종, 협력사 ${supplierCount}곳`,
+      );
+      showToast(
+        `자재 ${savedCount}종·협력사 ${supplierCount}곳을 시트에 반영했습니다.`,
+        'success',
+      );
     } catch (err: unknown) {
       console.error('원장 일괄 저장 실패:', err);
       setSheetStatus('error');
@@ -248,6 +316,48 @@ export default function App() {
     await loadMaterialsFromLedger(true);
   };
 
+  const handleApplyProductionConsumption = async (model: ProductionModel, productionUnits: number) => {
+    const lines = computeProductionConsumption(materials, model, productionUnits);
+    if (lines.length === 0) {
+      showToast('차감할 BOM 품목이 없습니다. 생산 수량을 확인해 주세요.', 'info');
+      return;
+    }
+
+    const next = applyProductionToMaterials(materials, model, productionUnits);
+    const negativeCount = lines.filter((line) => line.isNegative).length;
+    const modelLabel = PRODUCTION_MODEL_LABELS[model];
+
+    setMaterials(next);
+    persistMaterialsLocally(next);
+
+    try {
+      setSheetStatus('syncing');
+      showToast(
+        `${modelLabel} ${Math.floor(productionUnits)}대 생산 반영 중입니다.`,
+        'info',
+        true,
+      );
+      setSheetMessage(`${modelLabel} 생산 ${Math.floor(productionUnits)}대 반영 중...`);
+      await replaceAllMaterialsInLedger(webAppUrl, next);
+      setSheetStatus('connected');
+      setSheetMessage(`${modelLabel} 생산 반영 완료 (${lines.length}종 차감)`);
+      const warn =
+        negativeCount > 0
+          ? ` 마이너스 재고 ${negativeCount}종 포함.`
+          : '';
+      showToast(
+        `${modelLabel} ${Math.floor(productionUnits)}대 생산을 시트에 반영했습니다 (${lines.length}종 차감).${warn}`,
+        negativeCount > 0 ? 'info' : 'success',
+      );
+    } catch (err: unknown) {
+      console.error('생산 반영 원장 저장 오류:', err);
+      setSheetStatus('error');
+      const message = err instanceof Error ? err.message : '저장 실패';
+      showToast(`생산 반영 후 원장 저장 실패: ${message}`, 'error');
+      await loadMaterialsFromLedger(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#F4F5F8] text-slate-800 flex flex-col font-sans selection:bg-[#BA1B2D] selection:text-white">
       <Navbar
@@ -259,6 +369,7 @@ export default function App() {
         googleSheetUrl={googleSheetSettings.googleSheetUrl}
         googleScriptUrl={googleSheetSettings.googleScriptUrl}
         onGoogleSheetSettingsChange={(settings) => {
+          showToast('구글 시트 설정 저장 중입니다.', 'info', true);
           setGoogleSheetSettings(settings);
           localStorage.setItem(GOOGLE_SHEET_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
           showToast('구글 시트 설정을 저장했습니다.', 'success');
@@ -271,7 +382,9 @@ export default function App() {
             materials={materials}
             onAddMaterial={handleAddMaterial}
             onUpdateMaterial={handleUpdateMaterial}
-            onDeleteMaterial={handleDeleteMaterial}
+            onDeleteMaterials={handleDeleteMaterials}
+            onApplyProductionConsumption={handleApplyProductionConsumption}
+            isProductionSaving={sheetStatus === 'syncing'}
             initialEditingItem={editingMaterialForModal}
             onClearInitialEditingItem={() => setEditingMaterialForModal(null)}
           />
@@ -280,7 +393,7 @@ export default function App() {
         {activeTab === 'simulator' && (
           <AutoOrderSimulator
             materials={materials}
-            onDeleteMaterial={handleDeleteMaterial}
+            onDeleteMaterials={handleDeleteMaterials}
             onEditMaterial={(item) => {
               setEditingMaterialForModal(item);
               setActiveTab('materials');
@@ -289,37 +402,13 @@ export default function App() {
         )}
 
         {activeTab === 'suppliers' && (
-          <SupplierOrderManager materials={materials} webAppUrl={webAppUrl} />
+          <SupplierOrderManager materials={materials} webAppUrl={webAppUrl} onToast={showToast} />
         )}
       </main>
 
-      {isSaving && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in">
-          <div className="bg-white rounded-2xl shadow-2xl p-6 sm:p-8 max-w-md w-full border border-slate-200 text-center space-y-5">
-            <div className="relative mx-auto w-16 h-16 flex items-center justify-center">
-              <div className="absolute inset-0 rounded-full border-4 border-rose-100 animate-pulse" />
-              <div className="absolute inset-0 rounded-full border-4 border-t-[#BA1B2D] border-r-transparent border-b-transparent border-l-transparent animate-spin" />
-              <Save className="w-7 h-7 text-[#BA1B2D]" />
-            </div>
-
-            <div className="space-y-1.5">
-              <h3 className="text-lg font-bold text-slate-900">원장 자재관리DB 저장 중...</h3>
-              <p className="text-xs text-slate-500 leading-relaxed">
-                현재 앱의 자재 데이터 전체를 <strong>구글 원장 자재관리DB</strong> 시트에 반영하고 있습니다.
-              </p>
-            </div>
-
-            <div className="flex items-center justify-center gap-1.5 text-[11px] text-slate-400">
-              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
-              <span>창을 닫지 마시고 잠시만 기다려 주세요.</span>
-            </div>
-          </div>
-        </div>
-      )}
-
       {toastMessage && (
         <div
-          className={`fixed bottom-5 right-5 z-50 flex items-center gap-3 px-4 py-3 rounded-xl shadow-lg border text-xs sm:text-sm font-medium transition-all ${
+          className={`fixed bottom-5 right-5 z-[120] flex items-center gap-3 px-4 py-3 rounded-xl shadow-lg border text-xs sm:text-sm font-medium transition-all ${
             toastMessage.type === 'success'
               ? 'bg-emerald-900/95 text-white border-emerald-700'
               : toastMessage.type === 'error'

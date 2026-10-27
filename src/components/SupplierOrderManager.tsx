@@ -24,13 +24,14 @@ import {
   deleteSupplierInLedger,
 } from '../utils/googleSheetLedger';
 import { getMaterialsBySupplier } from '../utils/supplierMatching';
+import { displayedCurrentStock, displayedSafetyStock, stockStatus } from '../utils/stockDisplay';
+import { SUPPLIERS_STORAGE_KEY } from '../constants/ledgerStorage';
 
 interface SupplierOrderManagerProps {
   materials?: MaterialItem[];
   webAppUrl: string;
+  onToast?: (text: string, type: 'success' | 'info' | 'error', persist?: boolean) => void;
 }
-
-const SUPPLIERS_STORAGE_KEY = 'lucciem_suppliers_inventory_v2';
 
 const DEFAULT_PO_TERMS = [
   '모든 납품 자재는 본사 사전 승인된 규격서 및 시험성적서를 만족해야 합니다.',
@@ -87,6 +88,7 @@ const PoEditable: React.FC<{
 export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
   materials = RAW_MATERIALS_DATA,
   webAppUrl,
+  onToast,
 }) => {
   // Suppliers state with LocalStorage cache + 구글 원장 협력사관리DB
   const [suppliers, setSuppliers] = useState<SupplierInfo[]>(() => {
@@ -194,11 +196,15 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
         reliability: (formData.reliability as 'A' | 'B' | 'C') || 'A',
       };
       setSuppliers((prev) => prev.map((s) => (s.id === editingSupplier.id ? updated : s)));
+      onToast?.(`협력사 '${updated.name}' 저장 중입니다.`, 'info', true);
       try {
         const saved = await upsertSupplierInLedger(webAppUrl, updated);
         setSuppliers((prev) => prev.map((s) => (s.id === saved.id ? saved : s)));
+        onToast?.(`'${saved.name}' 협력사를 시트에 반영했습니다.`, 'success');
       } catch (err) {
         console.error('원장 협력사 수정 실패:', err);
+        const message = err instanceof Error ? err.message : '저장 실패';
+        onToast?.(`협력사 저장 실패: ${message}`, 'error');
         const ledgerList = await fetchSuppliersFromLedger(webAppUrl);
         if (ledgerList.length > 0) setSuppliers(ledgerList);
       }
@@ -216,11 +222,15 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
         reliability: (formData.reliability as 'A' | 'B' | 'C') || 'A',
       };
       setSuppliers((prev) => [...prev, newSupplier]);
+      onToast?.(`협력사 '${newSupplier.name}' 저장 중입니다.`, 'info', true);
       try {
         const saved = await upsertSupplierInLedger(webAppUrl, newSupplier);
         setSuppliers((prev) => prev.map((s) => (s.id === newSupplier.id ? saved : s)));
+        onToast?.(`'${saved.name}' 협력사를 시트에 반영했습니다.`, 'success');
       } catch (err) {
         console.error('원장 협력사 추가 실패:', err);
+        const message = err instanceof Error ? err.message : '저장 실패';
+        onToast?.(`협력사 저장 실패: ${message}`, 'error');
         const ledgerList = await fetchSuppliersFromLedger(webAppUrl);
         if (ledgerList.length > 0) setSuppliers(ledgerList);
       }
@@ -231,13 +241,7 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
 
   const handleDeleteSupplier = async (supplier: SupplierInfo) => {
     setSuppliers((prev) => prev.filter((s) => s.id !== supplier.id));
-    try {
-      await deleteSupplierInLedger(webAppUrl, supplier.id, supplier.recordUuid);
-    } catch (err) {
-      console.error('원장 협력사 삭제 실패:', err);
-      const ledgerList = await fetchSuppliersFromLedger(webAppUrl);
-      if (ledgerList.length > 0) setSuppliers(ledgerList);
-    }
+    await deleteSupplierInLedger(webAppUrl, supplier.id, supplier.recordUuid);
   };
 
   const toggleSupplierSelection = (id: string) => {
@@ -251,8 +255,27 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
 
   const handleConfirmSupplierBulkDelete = async () => {
     const targets = suppliers.filter((supplier) => selectedSupplierIds.has(supplier.id));
-    for (const supplier of targets) {
-      await handleDeleteSupplier(supplier);
+    if (targets.length === 0) {
+      setConfirmSupplierBulkDelete(false);
+      return;
+    }
+    const label = targets.length === 1 ? `'${targets[0].name}'` : `${targets.length}곳`;
+    onToast?.(`협력사 ${label} 삭제 중입니다.`, 'info', true);
+    try {
+      for (const supplier of targets) {
+        await handleDeleteSupplier(supplier);
+      }
+      onToast?.(`협력사 ${label}을 시트에서 삭제했습니다.`, 'success');
+    } catch (err) {
+      console.error('원장 협력사 삭제 실패:', err);
+      const message = err instanceof Error ? err.message : '협력사 삭제 실패';
+      onToast?.(`협력사 삭제 실패: ${message}`, 'error');
+      try {
+        const ledgerList = await fetchSuppliersFromLedger(webAppUrl);
+        if (ledgerList.length > 0) setSuppliers(ledgerList);
+      } catch {
+        // 화면 목록은 삭제 시도 상태를 유지한다.
+      }
     }
     setSelectedSupplierIds(new Set());
     setConfirmSupplierBulkDelete(false);
@@ -440,23 +463,22 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
 
   // Export CSV of materials needing order
   const handleExportOrderNeededCSV = () => {
-    const orderNeededList = materials.filter(m => {
-      const rop = m.reorderPoint > 0 ? m.reorderPoint : (m.safetyStock || 30);
-      return m.currentStock <= rop;
-    });
+    const orderNeededList = materials.filter(
+      (item) => stockStatus(displayedCurrentStock(item), displayedSafetyStock(item, 'ALL')) === 'ORDER_NEEDED',
+    );
 
     if (orderNeededList.length === 0) {
       return;
     }
 
-    const headers = ['순번', '품목명', '규격', '단가', '현재고', '재발주기준점', '조달소요일', '공급처'];
+    const headers = ['순번', '품목명', '규격', '단가', '현재고', '안전재고', '조달소요일', '공급처'];
     const rows = orderNeededList.map((item, index) => [
       index + 1,
       `"${item.name}"`,
       `"${item.spec}"`,
       item.unitPrice,
-      item.currentStock,
-      item.reorderPoint > 0 ? item.reorderPoint : item.safetyStock,
+      displayedCurrentStock(item),
+      displayedSafetyStock(item, 'ALL'),
       item.leadTimeDays,
       `"${item.supplier}"`,
     ]);
@@ -495,10 +517,10 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
             <button
               onClick={handleExportOrderNeededCSV}
               className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs sm:text-sm font-semibold rounded-xl transition-all shrink-0 active:scale-95"
-              title="현재고가 재발주 기준점 이하인 자재 목록을 CSV 파일로 다운로드합니다"
+              title="현재고가 안전재고의 50% 미만인 자재 목록을 CSV 파일로 다운로드합니다"
             >
               <FileDown className="w-4 h-4 text-slate-600" />
-              <span>발주 대상 목록 파일 다운로드</span>
+              <span>발주 대상 목록 다운로드</span>
             </button>
 
             <button
@@ -520,7 +542,7 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
           className="inline-flex items-center gap-1.5 rounded-xl border px-3.5 py-2 text-xs font-bold transition-colors disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 enabled:border-rose-200 enabled:bg-rose-50 enabled:text-[#BA1B2D] enabled:hover:bg-rose-100"
         >
           <Trash2 className="h-3.5 w-3.5" />
-          내역 삭제
+          협력사 삭제
         </button>
       </div>
 
@@ -529,7 +551,9 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
         {suppliers.map((supplier) => {
           // Count items needing order
           const matchedMaterials = getMaterialsBySupplier(materials, supplier);
-          const needingOrder = matchedMaterials.filter(m => m.currentStock <= m.reorderPoint);
+          const needingOrder = matchedMaterials.filter(
+            (item) => stockStatus(displayedCurrentStock(item), displayedSafetyStock(item, 'ALL')) === 'ORDER_NEEDED',
+          );
 
           return (
             <div 
