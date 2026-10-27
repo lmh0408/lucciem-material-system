@@ -2,7 +2,7 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 import { defineConfig } from 'vite';
-import { downloadSourceArchive } from './server/sourceDownload.mjs';
+import { handleSourceDownload } from './server/sourceDownload.mjs';
 import { handleGoogleLedgerProxy } from './server/googleLedgerProxy.mjs';
 
 export default defineConfig(() => {
@@ -14,7 +14,7 @@ export default defineConfig(() => {
         name: 'source-download-api',
         configureServer(server) {
           server.middlewares.use('/api/download-source', (request, response, next) => {
-            downloadSourceArchive(request, response, next, process.cwd());
+            handleSourceDownload(request, response, next, process.cwd());
           });
           server.middlewares.use('/api/google-ledger', (request, response) => {
             handleGoogleLedgerProxy(request, response);

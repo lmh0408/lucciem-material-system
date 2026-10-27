@@ -19,8 +19,15 @@ import {
 export type TabType = 'materials' | 'simulator' | 'suppliers';
 export type DbStatus = 'connected' | 'loading' | 'syncing' | 'error';
 
-/** 화면 표시 버전 v1.1 */
-const DISPLAYED_APP_VERSION = 'v1.1';
+/** 화면 표시 버전 v1.2 */
+const DISPLAYED_APP_VERSION = 'v1.2';
+
+type SaveFilePickerWindow = Window & {
+  showSaveFilePicker?: (options?: {
+    suggestedName?: string;
+    types?: Array<{ description?: string; accept: Record<string, string[]> }>;
+  }) => Promise<FileSystemFileHandle>;
+};
 
 interface NavbarProps {
   activeTab: TabType;
@@ -30,6 +37,7 @@ interface NavbarProps {
   googleSheetUrl?: string;
   googleScriptUrl?: string;
   onGoogleSheetSettingsChange?: (settings: { googleSheetUrl: string; googleScriptUrl: string }) => void;
+  onToast?: (text: string, type: 'success' | 'info' | 'error', persist?: boolean) => void;
   isSaving?: boolean;
 }
 
@@ -41,15 +49,105 @@ export const Navbar: React.FC<NavbarProps> = ({
   googleSheetUrl = 'https://docs.google.com/spreadsheets/d/1cqYtwVvxJU9UmQ0oHJYMFupGZDae5sN1bh3Grvrt7Xs/edit?usp=sharing',
   googleScriptUrl = '',
   onGoogleSheetSettingsChange,
+  onToast,
   isSaving = false,
 }) => {
   const [isSettingsOpen, setIsSettingsOpen] = React.useState(false);
+  const [settingsTab, setSettingsTab] = React.useState<'sheet' | 'source'>('sheet');
+  const [isDownloadingSource, setIsDownloadingSource] = React.useState(false);
   const [isAppsScriptCopied, setIsAppsScriptCopied] = React.useState(false);
   const [editingGoogleSheetUrl, setEditingGoogleSheetUrl] = React.useState(googleSheetUrl);
   const [editingGoogleScriptUrl, setEditingGoogleScriptUrl] = React.useState(googleScriptUrl);
 
   React.useEffect(() => setEditingGoogleSheetUrl(googleSheetUrl), [googleSheetUrl]);
   React.useEffect(() => setEditingGoogleScriptUrl(googleScriptUrl), [googleScriptUrl]);
+
+  const fetchSourceZip = async () => {
+    const response = await fetch('/api/download-source');
+    if (!response.ok) {
+      throw new Error(`서버 응답 ${response.status}`);
+    }
+    const blob = await response.blob();
+    if (blob.size === 0) {
+      throw new Error('받은 파일이 비어 있습니다.');
+    }
+    return blob;
+  };
+
+  const saveRecentlyChosenFile = async (chosenName: string) => {
+    setIsDownloadingSource(true);
+    onToast?.('프로젝트 소스를 저장하는 중입니다.', 'info', true);
+    try {
+      const response = await fetch('/api/download-source', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'overwrite-recent', filename: chosenName }),
+      });
+      const saved = await response.json().catch(() => null);
+      if (!response.ok || !saved?.ok || !(saved.bytes > 0)) {
+        throw new Error(saved?.message || `서버 응답 ${response.status}`);
+      }
+      onToast?.('프로젝트 소스를 내려받았습니다.', 'success');
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : '다운로드 실패';
+      onToast?.(`소스 받기 실패: ${message}`, 'error');
+    } finally {
+      setIsDownloadingSource(false);
+    }
+  };
+
+  const downloadSource = async () => {
+    if (isDownloadingSource) return;
+    const filename = 'lucm-material-source.zip';
+    const saveFilePicker = (window as SaveFilePickerWindow).showSaveFilePicker;
+    if (typeof saveFilePicker !== 'function') {
+      onToast?.('소스 받기 실패: 이 브라우저에서는 저장 창을 열 수 없습니다.', 'error');
+      return;
+    }
+
+    let writable: FileSystemWritableFileStream | null = null;
+    let fileHandle: FileSystemFileHandle | null = null;
+    try {
+      fileHandle = await saveFilePicker({
+        suggestedName: filename,
+        types: [{ description: 'ZIP 압축 파일', accept: { 'application/zip': ['.zip'] } }],
+      });
+      writable = await fileHandle.createWritable();
+    } catch (err: unknown) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
+      const blocked = err instanceof DOMException && (
+        err.name === 'SecurityError'
+        || err.name === 'NotAllowedError'
+        || /not allowed by the user agent/i.test(err.message)
+      );
+      if (blocked && fileHandle) {
+        await saveRecentlyChosenFile(fileHandle.name || filename);
+        return;
+      }
+      const message = err instanceof Error ? err.message : '저장 위치를 열 수 없습니다.';
+      onToast?.(`소스 받기 실패: ${message}`, 'error');
+      return;
+    }
+
+    setIsDownloadingSource(true);
+    onToast?.('프로젝트 소스를 저장하는 중입니다.', 'info', true);
+    try {
+      const blob = await fetchSourceZip();
+      await writable.write(blob);
+      await writable.close();
+      onToast?.('프로젝트 소스를 내려받았습니다.', 'success');
+    } catch (err: unknown) {
+      try {
+        await writable.abort();
+      } catch {
+        // 이미 닫힌 스트림은 무시한다.
+      }
+      const message = err instanceof Error ? err.message : '다운로드 실패';
+      onToast?.(`소스 받기 실패: ${message}`, 'error');
+    } finally {
+      setIsDownloadingSource(false);
+    }
+  };
 
   const copyAppsScriptCode = async () => {
     try {
@@ -132,22 +230,15 @@ export const Navbar: React.FC<NavbarProps> = ({
               <ExternalLink className="w-3 h-3 text-emerald-600 opacity-70" />
             </a>
 
-            <a
-              id="btn-download-source"
-              href="/api/download-source"
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 transition-colors cursor-pointer"
-              title="서버에 배포된 현재 프로젝트 소스를 내려받습니다"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>소스 받기</span>
-            </a>
-
             <button
               type="button"
               id="btn-settings"
-              onClick={() => setIsSettingsOpen(true)}
+              onClick={() => {
+                setSettingsTab('sheet');
+                setIsSettingsOpen(true);
+              }}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 transition-colors cursor-pointer"
-              title="구글 시트 및 동기화 설정"
+              title="구글 시트 연동 및 소스 받기"
             >
               <Settings className="w-3.5 h-3.5" />
               <span>설정</span>
@@ -180,17 +271,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
       {isSettingsOpen && createPortal(
         <div className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-slate-900/50 p-6">
-          <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              onGoogleSheetSettingsChange?.({
-                googleSheetUrl: editingGoogleSheetUrl.trim(),
-                googleScriptUrl: editingGoogleScriptUrl.trim(),
-              });
-              setIsSettingsOpen(false);
-            }}
-            className="relative my-auto w-full max-w-[720px] rounded-2xl border border-slate-200 bg-white px-10 py-9 shadow-xl"
-          >
+          <div className="relative my-auto w-full max-w-[720px] rounded-2xl border border-slate-200 bg-white px-10 py-9 shadow-xl">
             <button
               type="button"
               onClick={() => setIsSettingsOpen(false)}
@@ -199,49 +280,116 @@ export const Navbar: React.FC<NavbarProps> = ({
             >
               <X className="h-5 w-5" />
             </button>
-            <section className="pr-8">
-              <h2 className="text-lg font-bold tracking-tight text-slate-900">1. 시트 연결</h2>
-              <label className="mt-6 block text-sm font-bold text-slate-700">
-                구글 스프레드시트 URL
-                <input
-                  value={editingGoogleSheetUrl}
-                  onChange={(event) => setEditingGoogleSheetUrl(event.target.value)}
-                  required
-                  type="url"
-                  className="mt-3 w-full rounded-full border border-slate-200 bg-slate-50 px-5 py-3.5 font-mono text-sm font-normal tracking-wide text-slate-700 outline-none focus:border-[#BA1B2D] focus:ring-2 focus:ring-rose-100"
-                />
-              </label>
-            </section>
-            <section className="mt-8 border-t border-slate-200 pt-8 pr-8">
-              <h2 className="text-lg font-bold tracking-tight text-slate-900">2. 저장 연결</h2>
+            <div className="mb-8 flex gap-1 border-b border-slate-200 pr-8" role="tablist" aria-label="설정">
               <button
                 type="button"
-                onClick={copyAppsScriptCode}
-                className="mt-5 inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-bold text-white hover:bg-slate-700"
+                role="tab"
+                aria-selected={settingsTab === 'sheet'}
+                onClick={() => setSettingsTab('sheet')}
+                className={`-mb-px border-b-2 px-4 py-2.5 text-sm font-bold transition-colors ${
+                  settingsTab === 'sheet'
+                    ? 'border-[#BA1B2D] text-[#BA1B2D]'
+                    : 'border-transparent text-slate-500 hover:text-slate-800'
+                }`}
               >
-                {isAppsScriptCopied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-                {isAppsScriptCopied ? '코드 복사 완료' : 'Apps Script 코드 복사'}
+                구글 시트 연동 설정
               </button>
-              <label className="mt-6 block text-sm font-bold text-slate-700">
-                저장용 웹앱 URL
-                <input
-                  value={editingGoogleScriptUrl}
-                  onChange={(event) => setEditingGoogleScriptUrl(event.target.value)}
-                  required
-                  type="url"
-                  className="mt-3 w-full rounded-full border border-slate-200 bg-slate-50 px-5 py-3.5 font-mono text-sm font-normal tracking-wide text-slate-700 outline-none focus:border-[#BA1B2D] focus:ring-2 focus:ring-rose-100"
-                />
-              </label>
-            </section>
-            <div className="mt-8 flex justify-end gap-2 pr-8">
-              <button type="button" onClick={() => setIsSettingsOpen(false)} className="rounded-lg px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100">
-                취소
-              </button>
-              <button type="submit" className="rounded-lg bg-[#BA1B2D] px-4 py-2 text-sm font-bold text-white hover:bg-[#a01625]">
-                저장
+              <button
+                type="button"
+                role="tab"
+                aria-selected={settingsTab === 'source'}
+                onClick={() => setSettingsTab('source')}
+                className={`-mb-px border-b-2 px-4 py-2.5 text-sm font-bold transition-colors ${
+                  settingsTab === 'source'
+                    ? 'border-[#BA1B2D] text-[#BA1B2D]'
+                    : 'border-transparent text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                소스 받기
               </button>
             </div>
-          </form>
+            {settingsTab === 'sheet' ? (
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  onGoogleSheetSettingsChange?.({
+                    googleSheetUrl: editingGoogleSheetUrl.trim(),
+                    googleScriptUrl: editingGoogleScriptUrl.trim(),
+                  });
+                  setIsSettingsOpen(false);
+                }}
+              >
+                <section className="pr-8">
+                  <h2 className="text-lg font-bold tracking-tight text-slate-900">1. 시트 연결</h2>
+                  <label className="mt-6 block text-sm font-bold text-slate-700">
+                    구글 스프레드시트 URL
+                    <input
+                      value={editingGoogleSheetUrl}
+                      onChange={(event) => setEditingGoogleSheetUrl(event.target.value)}
+                      required
+                      type="url"
+                      className="mt-3 w-full rounded-full border border-slate-200 bg-slate-50 px-5 py-3.5 font-mono text-sm font-normal tracking-wide text-slate-700 outline-none focus:border-[#BA1B2D] focus:ring-2 focus:ring-rose-100"
+                    />
+                  </label>
+                </section>
+                <section className="mt-8 border-t border-slate-200 pt-8 pr-8">
+                  <h2 className="text-lg font-bold tracking-tight text-slate-900">2. 저장 연결</h2>
+                  <button
+                    type="button"
+                    onClick={copyAppsScriptCode}
+                    className="mt-5 inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-5 py-3 text-sm font-bold text-white hover:bg-slate-700"
+                  >
+                    {isAppsScriptCopied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                    {isAppsScriptCopied ? '코드 복사 완료' : 'Apps Script 코드 복사'}
+                  </button>
+                  <label className="mt-6 block text-sm font-bold text-slate-700">
+                    저장용 웹앱 URL
+                    <input
+                      value={editingGoogleScriptUrl}
+                      onChange={(event) => setEditingGoogleScriptUrl(event.target.value)}
+                      required
+                      type="url"
+                      className="mt-3 w-full rounded-full border border-slate-200 bg-slate-50 px-5 py-3.5 font-mono text-sm font-normal tracking-wide text-slate-700 outline-none focus:border-[#BA1B2D] focus:ring-2 focus:ring-rose-100"
+                    />
+                  </label>
+                </section>
+                <div className="mt-8 flex justify-end gap-2 pr-8">
+                  <button type="button" onClick={() => setIsSettingsOpen(false)} className="rounded-lg px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100">
+                    취소
+                  </button>
+                  <button type="submit" className="rounded-lg bg-[#BA1B2D] px-4 py-2 text-sm font-bold text-white hover:bg-[#a01625]">
+                    저장
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <section className="pr-8" role="tabpanel">
+                <h2 className="text-lg font-bold tracking-tight text-slate-900">프로젝트 소스</h2>
+                <p className="mt-3 text-sm leading-relaxed text-slate-600">
+                  서버에 있는 현재 프로젝트 소스를 zip 파일로 내려받습니다. git 기록, node_modules, 빌드 결과, 환경 변수 파일은 포함되지 않습니다.
+                </p>
+                <div className="mt-8 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsSettingsOpen(false)}
+                    className="rounded-lg px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100"
+                  >
+                    취소
+                  </button>
+                  <button
+                    type="button"
+                    id="btn-download-source"
+                    onClick={downloadSource}
+                    disabled={isDownloadingSource}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-[#BA1B2D] px-4 py-2 text-sm font-bold text-white hover:bg-[#a01625] disabled:cursor-wait disabled:opacity-70"
+                  >
+                    <Download className={`h-4 w-4 ${isDownloadingSource ? 'animate-pulse' : ''}`} />
+                    {isDownloadingSource ? '저장 중...' : '소스 받기'}
+                  </button>
+                </div>
+              </section>
+            )}
+          </div>
         </div>,
         document.body,
       )}

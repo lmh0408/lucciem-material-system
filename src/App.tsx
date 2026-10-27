@@ -368,6 +368,7 @@ export default function App() {
         isSaving={isSaving}
         googleSheetUrl={googleSheetSettings.googleSheetUrl}
         googleScriptUrl={googleSheetSettings.googleScriptUrl}
+        onToast={showToast}
         onGoogleSheetSettingsChange={(settings) => {
           showToast('구글 시트 설정 저장 중입니다.', 'info', true);
           setGoogleSheetSettings(settings);

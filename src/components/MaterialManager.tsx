@@ -414,16 +414,6 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
               </h3>
             </div>
           </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleOpenAddModal}
-              className="inline-flex items-center gap-1.5 px-4 py-2.5 text-xs sm:text-sm font-bold text-white bg-[#BA1B2D] hover:bg-[#a01625] rounded-xl transition-all shadow-xs shadow-red-600/20 active:scale-95 shrink-0"
-            >
-              <Plus className="w-4 h-4" />
-              <span>신규 자재 등록</span>
-            </button>
-          </div>
         </div>
 
         {/* Model Tabs (보관함 모델별 보기 기능) */}
@@ -531,23 +521,40 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
           </div>
 
           {(searchTerm || selectedCategory !== 'ALL' || selectedModel !== 'ALL') && (
-            <div className="flex items-center gap-2 text-xs text-slate-500 shrink-0">
-              <button
-                onClick={() => {
-                  setSearchTerm('');
-                  setSelectedCategory('ALL');
-                  setSelectedModel('ALL');
-                }}
-                className="text-[#BA1B2D] hover:underline font-medium"
-              >
-                필터 초기화
-              </button>
-            </div>
+            <button
+              onClick={() => {
+                setSearchTerm('');
+                setSelectedCategory('ALL');
+                setSelectedModel('ALL');
+              }}
+              className="text-xs text-[#BA1B2D] hover:underline font-medium shrink-0"
+            >
+              필터 초기화
+            </button>
           )}
+
+          <div className="flex items-center gap-2 shrink-0 sm:ml-auto">
+            <button
+              type="button"
+              disabled={selectedIds.size === 0 || isProductionSaving}
+              onClick={() => setItemsPendingDelete(selectedMaterials)}
+              className="inline-flex h-[37px] items-center gap-1.5 px-3 text-xs sm:text-sm font-bold rounded-xl border transition-all shrink-0 active:scale-95 disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 enabled:border-rose-200 enabled:bg-rose-50 enabled:text-[#BA1B2D] enabled:hover:bg-rose-100"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>항목 삭제</span>
+            </button>
+            <button
+              onClick={handleOpenAddModal}
+              className="inline-flex h-[37px] items-center gap-1.5 px-3 text-xs sm:text-sm font-bold text-white bg-[#BA1B2D] hover:bg-[#a01625] rounded-xl border border-[#BA1B2D] transition-all shadow-xs shadow-red-600/20 active:scale-95 shrink-0"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>신규 자재 등록</span>
+            </button>
+          </div>
         </div>
 
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          {isModelTab && onApplyProductionConsumption && (
+        {isModelTab && onApplyProductionConsumption && (
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <button
               type="button"
               disabled={isProductionSaving}
@@ -561,17 +568,8 @@ export const MaterialManager: React.FC<MaterialManagerProps> = ({
               )}
               제품 생산(자재 수량 반영)
             </button>
-          )}
-          <button
-            type="button"
-            disabled={selectedIds.size === 0 || isProductionSaving}
-            onClick={() => setItemsPendingDelete(selectedMaterials)}
-            className="inline-flex items-center gap-1.5 rounded-xl border px-3.5 py-2 text-xs font-bold transition-colors disabled:cursor-not-allowed disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 enabled:border-rose-200 enabled:bg-rose-50 enabled:text-[#BA1B2D] enabled:hover:bg-rose-100"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-            항목 삭제
-          </button>
-        </div>
+          </div>
+        )}
 
         {/* Materials Table */}
         <div className="border border-slate-200 rounded-xl overflow-hidden shadow-2xs">
