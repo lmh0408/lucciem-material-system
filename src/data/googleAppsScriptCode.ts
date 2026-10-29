@@ -459,14 +459,8 @@ function writeBlock_(sheet, startRow, rows, numCols) {
   var writtenLast = startRow - 1 + count;
   if (lastRow > writtenLast) {
     var extra = lastRow - writtenLast;
+    // 남은 행의 값만 지운다. deleteRows는 일괄 저장을 길게 만들고, 값이 없으면 다음 조회 범위에 들어가지 않는다.
     sheet.getRange(writtenLast + 1, 1, extra, Math.max(sheet.getLastColumn(), numCols)).clearContent();
-    if (writtenLast >= 1 && extra > 0) {
-      try {
-        sheet.deleteRows(writtenLast + 1, extra);
-      } catch (err) {
-        // 고정 행만 남는 경우에는 내용만 비워 둔다.
-      }
-    }
   }
 }
 
