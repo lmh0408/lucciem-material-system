@@ -96,25 +96,30 @@ function looksLikeLedgerJson(text: string): boolean {
 
 /** GAS 웹앱 POST: follow → (실패 시) manual 302 후 GET */
 async function postLedgerDirect(webAppUrl: string, body: string, signal: AbortSignal): Promise<string> {
-  let response = await fetch(webAppUrl, {
-    method: 'POST',
-    headers: POST_HEADERS,
-    body,
-    redirect: 'follow',
-    signal,
-  });
-  let text = await response.text();
-  if (response.ok && looksLikeLedgerJson(text)) {
-    return text;
+  try {
+    const followed = await fetch(webAppUrl, {
+      method: 'POST',
+      headers: POST_HEADERS,
+      body,
+      redirect: 'follow',
+      signal,
+    });
+    const followedText = await followed.text();
+    if (followed.ok && looksLikeLedgerJson(followedText)) {
+      return followedText;
+    }
+  } catch {
+    // AI Studio처럼 리다이렉트 추적이 막히면 아래에서 302를 직접 연다.
   }
 
-  response = await fetch(webAppUrl, {
+  let response = await fetch(webAppUrl, {
     method: 'POST',
     headers: POST_HEADERS,
     body,
     redirect: 'manual',
     signal,
   });
+  let text = '';
 
   if (response.status === 302 || response.status === 303 || response.status === 307 || response.status === 308) {
     const location = response.headers.get('Location');
@@ -125,6 +130,8 @@ async function postLedgerDirect(webAppUrl: string, body: string, signal: AbortSi
       throw new Error('원장 API 리다이렉트 URL이 허용되지 않습니다.');
     }
     response = await fetch(location, { method: 'GET', redirect: 'follow', signal });
+    text = await response.text();
+  } else {
     text = await response.text();
   }
 
@@ -151,15 +158,8 @@ async function postLedgerViaServerProxy(
     signal,
   });
   const text = await response.text();
-  if (!response.ok) {
-    let message = text.slice(0, 200);
-    try {
-      const errBody = JSON.parse(text) as { message?: string };
-      if (errBody.message) message = errBody.message;
-    } catch {
-      // keep raw snippet
-    }
-    throw new Error(message || `원장 프록시 HTTP ${response.status}`);
+  if (!response.ok || !looksLikeLedgerJson(text)) {
+    throw new Error('원장 프록시가 JSON 응답을 반환하지 않았습니다.');
   }
   return text;
 }
