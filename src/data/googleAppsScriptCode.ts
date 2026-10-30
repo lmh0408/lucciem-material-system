@@ -21,6 +21,7 @@ const SUPPLIER_HEADERS = [
   '평균조달일(일)',
   '연결품목수',
   'recordUuid',
+  'updatedAt',
 ];
 const SUPPLIER_COL = {
   NO: 1,
@@ -33,7 +34,10 @@ const SUPPLIER_COL = {
   LEAD_DAYS: 8,
   ITEMS_COUNT: 9,
   RECORD_UUID: 10,
+  UPDATED_AT: 11,
 };
+const LEDGER_VERSION_KEY = 'ledgerVersion';
+const STALE_WRITE_MESSAGE = '다른 팀원이 먼저 수정했습니다.';
 
 /** 4대 제품 BOM 탭 (원장 시트) */
 const BOM_TABS = [
@@ -69,7 +73,8 @@ function doPost(e) {
     }
     return handleAction(payload.action, payload);
   } catch (error) {
-    return fail('', String(error));
+    var message = error && error.message ? String(error.message) : String(error);
+    return fail('', message);
   }
 }
 
@@ -87,45 +92,100 @@ function fail(action, message) {
   return jsonResponse({ success: false, action: action || '', message: message });
 }
 
+function assertFresh_(storedItems, baseVersions) {
+  if (!baseVersions || typeof baseVersions !== 'object') return;
+  (storedItems || []).forEach(function (item) {
+    if (!item || item.id == null || item.id === '') return;
+    var id = String(item.id);
+    if (!Object.prototype.hasOwnProperty.call(baseVersions, id)) {
+      throw new Error(STALE_WRITE_MESSAGE);
+    }
+    var stored = String(item.updatedAt || '');
+    var base = baseVersions[id] == null ? '' : String(baseVersions[id]);
+    if (stored && base !== stored) {
+      throw new Error(STALE_WRITE_MESSAGE);
+    }
+  });
+}
+
+function assertRowFresh_(storedUpdatedAt, baseUpdatedAt) {
+  if (baseUpdatedAt === undefined || baseUpdatedAt === null) return;
+  var stored = String(storedUpdatedAt || '');
+  if (stored && String(baseUpdatedAt) !== stored) {
+    throw new Error(STALE_WRITE_MESSAGE);
+  }
+}
+
+function readLedgerVersion_() {
+  return PropertiesService.getScriptProperties().getProperty(LEDGER_VERSION_KEY) || '';
+}
+
+function touchLedgerVersion_() {
+  var version = new Date().toISOString();
+  PropertiesService.getScriptProperties().setProperty(LEDGER_VERSION_KEY, version);
+  return version;
+}
+
+function finishWrite_(action, extra) {
+  var body = extra || {};
+  body.version = touchLedgerVersion_();
+  return ok(action, body);
+}
+
 function handleAction(action, payload) {
   ensureSheets();
   switch (action) {
     case 'health':
       return ok('health', { message: 'Lucciem ledger API ready' });
+    case 'ledgerVersion':
+      return ok('ledgerVersion', { version: readLedgerVersion_() });
     case 'listMaterials':
       return ok('listMaterials', { materials: listMaterials_() });
     case 'listSuppliers':
       return ok('listSuppliers', { suppliers: listSuppliers_() });
     case 'upsertMaterial':
-      return ok('upsertMaterial', { material: upsertMaterial_(payload.material) });
+      return finishWrite_('upsertMaterial', { material: upsertMaterial_(payload.material) });
     case 'deleteMaterial':
       deleteMaterial_(payload.id, payload.recordUuid);
-      return ok('deleteMaterial');
+      return finishWrite_('deleteMaterial');
+    case 'deleteMaterials':
+      deleteMaterials_(payload.materials || []);
+      return finishWrite_('deleteMaterials');
     case 'upsertSupplier':
-      return ok('upsertSupplier', { supplier: upsertSupplier_(payload.supplier) });
+      return finishWrite_('upsertSupplier', { supplier: upsertSupplier_(payload.supplier) });
     case 'deleteSupplier':
       deleteSupplier_(payload.id, payload.recordUuid);
-      return ok('deleteSupplier');
+      return finishWrite_('deleteSupplier');
+    case 'deleteSuppliers':
+      deleteSuppliers_(payload.suppliers || []);
+      return finishWrite_('deleteSuppliers');
     case 'replaceAllMaterials': {
       var materials = payload.materials || [];
+      assertFresh_(listMaterials_(), payload.baseVersions);
       replaceAllMaterials_(materials);
-      return ok('replaceAllMaterials', { count: materials.length });
+      return finishWrite_('replaceAllMaterials', { count: materials.length });
     }
     case 'replaceAllSuppliers': {
       var suppliers = payload.suppliers || [];
+      assertFresh_(listSuppliers_(), payload.baseVersions);
       replaceAllSuppliers_(suppliers);
-      return ok('replaceAllSuppliers', { count: suppliers.length });
+      return finishWrite_('replaceAllSuppliers', { count: suppliers.length });
     }
     case 'saveLedger': {
       var saveMaterials = payload.materials || [];
       var saveSuppliers = payload.suppliers || [];
+      assertFresh_(listMaterials_(), payload.baseVersions);
+      assertFresh_(listSuppliers_(), payload.supplierBaseVersions);
       replaceAllMaterials_(saveMaterials);
       replaceAllSuppliers_(saveSuppliers);
-      return ok('saveLedger', {
+      return finishWrite_('saveLedger', {
         materialCount: saveMaterials.length,
         supplierCount: saveSuppliers.length,
       });
     }
+    case 'rebuildBom':
+      rebuildAllBomTabsFromMaterials_(listMaterials_());
+      return ok('rebuildBom');
     default:
       return fail(action, 'Unknown action: ' + action);
   }
@@ -178,6 +238,12 @@ function ensureSupplierSheetTable_(sheet) {
   headerRange.setBackground('#e8eaed');
 }
 
+function ensureSupplierUpdatedAtHeader_(sheet) {
+  if (String(sheet.getRange(1, SUPPLIER_COL.UPDATED_AT).getValue() || '') !== 'updatedAt') {
+    sheet.getRange(1, SUPPLIER_COL.UPDATED_AT).setValue('updatedAt');
+  }
+}
+
 function supplierToRowValues_(no, supplier) {
   var recordUuid = supplier.recordUuid || Utilities.getUuid();
   var id = String(supplier.id || '');
@@ -192,6 +258,7 @@ function supplierToRowValues_(no, supplier) {
     Number(supplier.leadTimeAvgDays || 0),
     Number(supplier.itemsCount || 0),
     recordUuid,
+    String(supplier.updatedAt || ''),
   ];
 }
 
@@ -209,6 +276,7 @@ function rowValuesToSupplier_(row) {
     reliability: String(row[SUPPLIER_COL.RELIABILITY - 1] || 'B').trim(),
     leadTimeAvgDays: Number(row[SUPPLIER_COL.LEAD_DAYS - 1] || 0),
     itemsCount: Number(row[SUPPLIER_COL.ITEMS_COUNT - 1] || 0),
+    updatedAt: String(row[SUPPLIER_COL.UPDATED_AT - 1] || '').trim(),
   };
 }
 
@@ -292,18 +360,23 @@ function upsertMaterial_(material) {
   const sheet = getSheet_(MATERIALS_SHEET);
   const recordUuid = material.recordUuid || Utilities.getUuid();
   const id = Number(material.id);
+  var baseUpdatedAt = material.baseUpdatedAt;
   const payload = Object.assign({}, material, { recordUuid: recordUuid, id: id, updatedAt: material.updatedAt || new Date().toISOString() });
+  delete payload.baseUpdatedAt;
   const rowIndex = findRowIndex_(sheet, recordUuid, String(id));
   var previousName = '';
   var previousSpec = '';
+  var previousUpdatedAt = '';
   if (rowIndex !== -1) {
     try {
       const prev = JSON.parse(String(sheet.getRange(rowIndex, 3).getValue() || '{}'));
       previousName = String(prev.name || '').trim();
       previousSpec = String(prev.spec || '').trim();
+      previousUpdatedAt = String(prev.updatedAt || '');
     } catch (err) {
       // ignore
     }
+    assertRowFresh_(previousUpdatedAt, baseUpdatedAt);
   }
   writeJsonRow_(sheet, rowIndex, recordUuid, id, payload);
   if (
@@ -336,6 +409,24 @@ function deleteMaterial_(id, recordUuid) {
   }
 }
 
+function matchesRemoval_(item, removals) {
+  return (removals || []).some(function (target) {
+    var uuid = String((target && target.recordUuid) || '');
+    var id = target && target.id != null ? String(target.id) : '';
+    var sameUuid = uuid && String(item.recordUuid || '') === uuid;
+    var sameId = id && String(item.id) === id;
+    return sameUuid || sameId;
+  });
+}
+
+function deleteMaterials_(items) {
+  var kept = listMaterials_().filter(function (material) {
+    return !matchesRemoval_(material, items);
+  });
+  replaceAllMaterials_(kept);
+  rebuildAllBomTabsFromMaterials_(kept);
+}
+
 function upsertSupplier_(supplier) {
   if (!supplier) throw new Error('supplier is required');
   var sheet = getSheet_(SUPPLIERS_SHEET);
@@ -343,14 +434,21 @@ function upsertSupplier_(supplier) {
     migrateSupplierSheetToTable_(sheet);
   }
   ensureSupplierSheetTable_(sheet);
+  ensureSupplierUpdatedAtHeader_(sheet);
   var recordUuid = supplier.recordUuid || Utilities.getUuid();
   var id = String(supplier.id || '');
+  var baseUpdatedAt = supplier.baseUpdatedAt;
   var payload = Object.assign({}, supplier, {
     recordUuid: recordUuid,
     id: id,
     updatedAt: supplier.updatedAt || new Date().toISOString(),
   });
+  delete payload.baseUpdatedAt;
   var rowIndex = findSupplierRowIndex_(sheet, recordUuid, id);
+  if (rowIndex !== -1) {
+    var storedAt = String(sheet.getRange(rowIndex, SUPPLIER_COL.UPDATED_AT).getValue() || '');
+    assertRowFresh_(storedAt, baseUpdatedAt);
+  }
   var no = rowIndex > 0 ? sheet.getRange(rowIndex, 1).getValue() : nextSupplierNo_(sheet);
   writeSupplierTableRow_(sheet, rowIndex, no, payload);
   return payload;
@@ -374,6 +472,13 @@ function deleteSupplier_(id, recordUuid) {
     clearOrDeleteRow_(sheet, fallbackRow);
     return;
   }
+  replaceAllSuppliers_(next);
+}
+
+function deleteSuppliers_(items) {
+  var next = listSuppliers_().filter(function (supplier) {
+    return !matchesRemoval_(supplier, items);
+  });
   replaceAllSuppliers_(next);
 }
 
@@ -425,10 +530,10 @@ function replaceAllMaterials_(materials) {
       id: id,
       updatedAt: material.updatedAt || new Date().toISOString(),
     });
+    delete payload.baseUpdatedAt;
     return [recordUuid, id, JSON.stringify(payload)];
   });
   writeBlock_(sheet, 2, rows, 3);
-  rebuildAllBomTabsFromMaterials_(materials);
 }
 
 function replaceAllSuppliers_(suppliers) {
@@ -437,6 +542,7 @@ function replaceAllSuppliers_(suppliers) {
     sheet.getRange(1, 1, 1, 3).clearContent();
   }
   ensureSupplierSheetTable_(sheet);
+  ensureSupplierUpdatedAtHeader_(sheet);
   var rows = (suppliers || []).map(function (supplier, idx) {
     var recordUuid = supplier.recordUuid || Utilities.getUuid();
     var id = String(supplier.id || '');
@@ -445,6 +551,7 @@ function replaceAllSuppliers_(suppliers) {
       id: id,
       updatedAt: supplier.updatedAt || new Date().toISOString(),
     });
+    delete payload.baseUpdatedAt;
     return supplierToRowValues_(idx + 1, payload);
   });
   writeBlock_(sheet, 2, rows, SUPPLIER_HEADERS.length);

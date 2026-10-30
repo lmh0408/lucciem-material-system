@@ -1,4 +1,5 @@
 import { MaterialItem, SupplierInfo } from '../types/inventory';
+import { setKnownLedgerVersion } from './ledgerRevision';
 
 export const GOOGLE_SCRIPT_WEBAPP_URL =
   'https://script.google.com/macros/s/AKfycby5Ej456eViW4ubnSNwTJHNcCRxwZ5NCzZs8Bo6wQtznqNa9a04sCbyESoWe87Y4nOS/exec';
@@ -47,6 +48,10 @@ function parseLedgerResponse<T extends { success: boolean }>(
   }
 
   return parsed;
+}
+
+function noteLedgerVersion(result: { version?: string }) {
+  if (result.version) setKnownLedgerVersion(result.version);
 }
 
 const LEDGER_PROXY_PATH = '/api/google-ledger';
@@ -287,17 +292,32 @@ export async function fetchSuppliersFromLedger(webAppUrl: string): Promise<Suppl
   }
 }
 
+export async function fetchLedgerVersion(webAppUrl: string): Promise<string> {
+  const result = await callLedgerApi<{ success: boolean; version?: string }>(webAppUrl, {
+    action: 'ledgerVersion',
+  });
+  return String(result.version || '');
+}
+
+export async function rebuildBomInLedger(webAppUrl: string): Promise<void> {
+  await callLedgerApi<{ success: boolean }>(webAppUrl, { action: 'rebuildBom' });
+}
+
 export async function upsertMaterialInLedger(
   webAppUrl: string,
   material: MaterialItem,
+  baseUpdatedAt?: string,
 ): Promise<MaterialItem> {
-  const result = await callLedgerApi<{ success: boolean; material: MaterialItem }>(webAppUrl, {
+  const materialPayload = cloneForLedgerJson(material) as MaterialItem & { baseUpdatedAt?: string };
+  if (baseUpdatedAt !== undefined) materialPayload.baseUpdatedAt = baseUpdatedAt;
+  const result = await callLedgerApi<{ success: boolean; material: MaterialItem; version?: string }>(webAppUrl, {
     action: 'upsertMaterial',
-    material: cloneForLedgerJson(material),
+    material: materialPayload,
   });
   if (!result.material) {
     throw new Error('원장에 자재를 저장했지만 응답 데이터가 없습니다.');
   }
+  noteLedgerVersion(result);
   return result.material;
 }
 
@@ -306,24 +326,40 @@ export async function deleteMaterialInLedger(
   id: number,
   recordUuid?: string,
 ): Promise<void> {
-  await callLedgerApi<{ success: boolean }>(webAppUrl, {
+  const result = await callLedgerApi<{ success: boolean; version?: string }>(webAppUrl, {
     action: 'deleteMaterial',
     id,
     recordUuid,
   });
+  noteLedgerVersion(result);
+}
+
+export async function deleteMaterialsInLedger(
+  webAppUrl: string,
+  materials: Array<{ id: number; recordUuid?: string }>,
+): Promise<void> {
+  const result = await callLedgerApi<{ success: boolean; version?: string }>(webAppUrl, {
+    action: 'deleteMaterials',
+    materials,
+  });
+  noteLedgerVersion(result);
 }
 
 export async function upsertSupplierInLedger(
   webAppUrl: string,
   supplier: SupplierInfo,
+  baseUpdatedAt?: string,
 ): Promise<SupplierInfo> {
-  const result = await callLedgerApi<{ success: boolean; supplier: SupplierInfo }>(webAppUrl, {
+  const supplierPayload = cloneForLedgerJson(supplier) as SupplierInfo & { baseUpdatedAt?: string };
+  if (baseUpdatedAt !== undefined) supplierPayload.baseUpdatedAt = baseUpdatedAt;
+  const result = await callLedgerApi<{ success: boolean; supplier: SupplierInfo; version?: string }>(webAppUrl, {
     action: 'upsertSupplier',
-    supplier,
+    supplier: supplierPayload,
   });
   if (!result.supplier) {
     throw new Error('원장에 협력사를 저장했지만 응답 데이터가 없습니다.');
   }
+  noteLedgerVersion(result);
   return result.supplier;
 }
 
@@ -332,21 +368,36 @@ export async function deleteSupplierInLedger(
   id: string,
   recordUuid?: string,
 ): Promise<void> {
-  await callLedgerApi<{ success: boolean }>(webAppUrl, {
+  const result = await callLedgerApi<{ success: boolean; version?: string }>(webAppUrl, {
     action: 'deleteSupplier',
     id,
     recordUuid,
   });
+  noteLedgerVersion(result);
+}
+
+export async function deleteSuppliersInLedger(
+  webAppUrl: string,
+  suppliers: Array<{ id: string; recordUuid?: string }>,
+): Promise<void> {
+  const result = await callLedgerApi<{ success: boolean; version?: string }>(webAppUrl, {
+    action: 'deleteSuppliers',
+    suppliers,
+  });
+  noteLedgerVersion(result);
 }
 
 export async function replaceAllMaterialsInLedger(
   webAppUrl: string,
   materials: MaterialItem[],
+  baseVersions?: Record<string, string>,
 ): Promise<number> {
-  const result = await callLedgerApi<{ success: boolean; count: number }>(webAppUrl, {
+  const result = await callLedgerApi<{ success: boolean; count: number; version?: string }>(webAppUrl, {
     action: 'replaceAllMaterials',
     materials,
+    ...(baseVersions ? { baseVersions } : {}),
   });
+  noteLedgerVersion(result);
   return Number(result.count ?? materials.length);
 }
 
@@ -354,29 +405,39 @@ export async function saveLedgerSnapshot(
   webAppUrl: string,
   materials: MaterialItem[],
   suppliers: SupplierInfo[],
-): Promise<{ materialCount: number; supplierCount: number }> {
+  baseVersions?: Record<string, string>,
+  supplierBaseVersions?: Record<string, string>,
+): Promise<{ materialCount: number; supplierCount: number; version: string }> {
   const result = await callLedgerApi<{
     success: boolean;
     materialCount: number;
     supplierCount: number;
+    version?: string;
   }>(webAppUrl, {
     action: 'saveLedger',
     materials,
     suppliers,
+    ...(baseVersions ? { baseVersions } : {}),
+    ...(supplierBaseVersions ? { supplierBaseVersions } : {}),
   });
+  noteLedgerVersion(result);
   return {
     materialCount: Number(result.materialCount ?? materials.length),
     supplierCount: Number(result.supplierCount ?? suppliers.length),
+    version: String(result.version || ''),
   };
 }
 
 export async function replaceAllSuppliersInLedger(
   webAppUrl: string,
   suppliers: SupplierInfo[],
+  baseVersions?: Record<string, string>,
 ): Promise<number> {
-  const result = await callLedgerApi<{ success: boolean; count: number }>(webAppUrl, {
+  const result = await callLedgerApi<{ success: boolean; count: number; version?: string }>(webAppUrl, {
     action: 'replaceAllSuppliers',
     suppliers,
+    ...(baseVersions ? { baseVersions } : {}),
   });
+  noteLedgerVersion(result);
   return Number(result.count ?? suppliers.length);
 }

@@ -22,7 +22,14 @@ import {
   fetchSuppliersFromLedger,
   upsertSupplierInLedger,
   deleteSupplierInLedger,
+  deleteSuppliersInLedger,
 } from '../utils/googleSheetLedger';
+import {
+  noteSupplierSaved,
+  registerSupplierReload,
+  rememberSuppliers,
+  supplierBase,
+} from '../utils/ledgerRevision';
 import { getMaterialsBySupplier } from '../utils/supplierMatching';
 import { displayedCurrentStock, displayedSafetyStock, stockStatus } from '../utils/stockDisplay';
 import { SUPPLIERS_STORAGE_KEY } from '../constants/ledgerStorage';
@@ -111,17 +118,19 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
     const loadSuppliers = async () => {
       try {
         const ledgerList = await fetchSuppliersFromLedger(webAppUrl);
-        if (isMounted && ledgerList.length > 0) {
-          setSuppliers(ledgerList);
-          localStorage.setItem(SUPPLIERS_STORAGE_KEY, JSON.stringify(ledgerList));
-        }
+        if (!isMounted || ledgerList.length === 0) return;
+        rememberSuppliers(ledgerList);
+        setSuppliers(ledgerList);
+        localStorage.setItem(SUPPLIERS_STORAGE_KEY, JSON.stringify(ledgerList));
       } catch (err) {
         console.warn('원장 협력사 불러오기 실패, 로컬 캐시 유지:', err);
       }
     };
+    const unregister = registerSupplierReload(loadSuppliers);
     loadSuppliers();
     return () => {
       isMounted = false;
+      unregister();
     };
   }, [webAppUrl]);
 
@@ -194,11 +203,13 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
         phone: formData.phone?.trim() || '',
         leadTimeAvgDays: Number(formData.leadTimeAvgDays) || 7,
         reliability: (formData.reliability as 'A' | 'B' | 'C') || 'A',
+        updatedAt: new Date().toISOString(),
       };
       setSuppliers((prev) => prev.map((s) => (s.id === editingSupplier.id ? updated : s)));
       onToast?.(`협력사 '${updated.name}' 저장 중입니다.`, 'info', true);
       try {
-        const saved = await upsertSupplierInLedger(webAppUrl, updated);
+        const saved = await upsertSupplierInLedger(webAppUrl, updated, supplierBase(editingSupplier.id));
+        noteSupplierSaved(saved.id, saved.updatedAt);
         setSuppliers((prev) => prev.map((s) => (s.id === saved.id ? saved : s)));
         onToast?.(`'${saved.name}' 협력사를 시트에 반영했습니다.`, 'success');
       } catch (err) {
@@ -206,7 +217,10 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
         const message = err instanceof Error ? err.message : '저장 실패';
         onToast?.(`협력사 저장 실패: ${message}`, 'error');
         const ledgerList = await fetchSuppliersFromLedger(webAppUrl);
-        if (ledgerList.length > 0) setSuppliers(ledgerList);
+        if (ledgerList.length > 0) {
+          rememberSuppliers(ledgerList);
+          setSuppliers(ledgerList);
+        }
       }
     } else {
       const nextNum = suppliers.length + 1;
@@ -225,6 +239,7 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
       onToast?.(`협력사 '${newSupplier.name}' 저장 중입니다.`, 'info', true);
       try {
         const saved = await upsertSupplierInLedger(webAppUrl, newSupplier);
+        noteSupplierSaved(saved.id, saved.updatedAt);
         setSuppliers((prev) => prev.map((s) => (s.id === newSupplier.id ? saved : s)));
         onToast?.(`'${saved.name}' 협력사를 시트에 반영했습니다.`, 'success');
       } catch (err) {
@@ -232,7 +247,10 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
         const message = err instanceof Error ? err.message : '저장 실패';
         onToast?.(`협력사 저장 실패: ${message}`, 'error');
         const ledgerList = await fetchSuppliersFromLedger(webAppUrl);
-        if (ledgerList.length > 0) setSuppliers(ledgerList);
+        if (ledgerList.length > 0) {
+          rememberSuppliers(ledgerList);
+          setSuppliers(ledgerList);
+        }
       }
     }
 
@@ -261,10 +279,23 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
     }
     const label = targets.length === 1 ? `'${targets[0].name}'` : `${targets.length}곳`;
     onToast?.(`협력사 ${label} 삭제 중입니다.`, 'info', true);
+    setSuppliers((prev) => prev.filter((supplier) => !selectedSupplierIds.has(supplier.id)));
     try {
-      for (const supplier of targets) {
-        await handleDeleteSupplier(supplier);
+      try {
+        await deleteSuppliersInLedger(
+          webAppUrl,
+          targets.map((supplier) => ({ id: supplier.id, recordUuid: supplier.recordUuid })),
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : '';
+        if (!message.includes('Unknown action') && !message.includes('다른 응답')) throw err;
+        for (const supplier of targets) {
+          await deleteSupplierInLedger(webAppUrl, supplier.id, supplier.recordUuid);
+        }
       }
+      rememberSuppliers(
+        suppliers.filter((supplier) => !selectedSupplierIds.has(supplier.id)),
+      );
       onToast?.(`협력사 ${label}을 시트에서 삭제했습니다.`, 'success');
     } catch (err) {
       console.error('원장 협력사 삭제 실패:', err);
@@ -272,7 +303,10 @@ export const SupplierOrderManager: React.FC<SupplierOrderManagerProps> = ({
       onToast?.(`협력사 삭제 실패: ${message}`, 'error');
       try {
         const ledgerList = await fetchSuppliersFromLedger(webAppUrl);
-        if (ledgerList.length > 0) setSuppliers(ledgerList);
+        if (ledgerList.length > 0) {
+          rememberSuppliers(ledgerList);
+          setSuppliers(ledgerList);
+        }
       } catch {
         // 화면 목록은 삭제 시도 상태를 유지한다.
       }

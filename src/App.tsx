@@ -13,13 +13,27 @@ import { MaterialItem, SupplierInfo } from './types/inventory';
 import { SUPPLIERS_STORAGE_KEY } from './constants/ledgerStorage';
 import {
   fetchMaterialsFromLedger,
+  fetchLedgerVersion,
   upsertMaterialInLedger,
   deleteMaterialInLedger,
+  deleteMaterialsInLedger,
   replaceAllMaterialsInLedger,
   replaceAllSuppliersInLedger,
+  rebuildBomInLedger,
   saveLedgerSnapshot,
   GOOGLE_SCRIPT_WEBAPP_URL,
 } from './utils/googleSheetLedger';
+import {
+  getKnownLedgerVersion,
+  getMaterialBases,
+  getSupplierBases,
+  materialBase,
+  noteMaterialSaved,
+  rememberMaterials,
+  rememberSuppliers,
+  setKnownLedgerVersion,
+  reloadSuppliersFromLedger,
+} from './utils/ledgerRevision';
 import { CheckCircle2, AlertCircle, X, FileSpreadsheet } from 'lucide-react';
 import {
   applyProductionToMaterials,
@@ -82,7 +96,7 @@ export default function App() {
   });
 
   const [sheetStatus, setSheetStatus] = useState<DbStatus>('loading');
-  const [isSaving, setIsSaving] = useState(false);
+  const isSaving = false;
   const [sheetMessage, setSheetMessage] = useState<string>('구글 원장에서 자재 데이터를 불러오는 중...');
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'info' | 'error' } | null>(
     null,
@@ -128,6 +142,7 @@ export default function App() {
 
         if (ledgerMaterials.length > 0) {
           const sorted = [...ledgerMaterials].sort((a, b) => a.id - b.id);
+          rememberMaterials(sorted);
           setMaterials(sorted);
           persistMaterialsLocally(sorted);
           setSheetStatus('connected');
@@ -157,6 +172,70 @@ export default function App() {
     loadMaterialsFromLedger(false);
   }, [loadMaterialsFromLedger]);
 
+  const materialsRef = useRef(materials);
+  materialsRef.current = materials;
+  const ledgerQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const ledgerWriteDepthRef = useRef(0);
+
+  const enqueueLedgerWrite = (task: () => Promise<void>) => {
+    ledgerWriteDepthRef.current += 1;
+    const run = ledgerQueueRef.current.then(task, task);
+    ledgerQueueRef.current = run.finally(() => {
+      ledgerWriteDepthRef.current = Math.max(0, ledgerWriteDepthRef.current - 1);
+    });
+    return run;
+  };
+
+  const refreshBomInBackground = () => {
+    void rebuildBomInLedger(webAppUrl).catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : '';
+      if (message.includes('Unknown action') || message.includes('다른 응답')) return;
+      showToast('원장 저장은 반영됐지만 BOM 갱신에 실패했습니다.', 'error');
+    });
+  };
+
+  useEffect(() => {
+    if (!webAppUrl) return;
+    let stopped = false;
+    let timer = 0;
+    const tick = async () => {
+      if (stopped || document.visibilityState === 'hidden') return;
+      if (ledgerWriteDepthRef.current > 0) return;
+      try {
+        const version = await fetchLedgerVersion(webAppUrl);
+        if (stopped || ledgerWriteDepthRef.current > 0) return;
+        const known = getKnownLedgerVersion();
+        if (!known) {
+          setKnownLedgerVersion(version);
+          return;
+        }
+        if (version && version !== known) {
+          setKnownLedgerVersion(version);
+          await loadMaterialsFromLedger(false);
+          await reloadSuppliersFromLedger();
+        }
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : '';
+        if (message.includes('Unknown action') || message.includes('다른 응답')) {
+          stopped = true;
+          window.clearInterval(timer);
+        }
+      }
+    };
+    timer = window.setInterval(() => {
+      void tick();
+    }, 15_000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void tick();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [webAppUrl, loadMaterialsFromLedger]);
+
   useEffect(() => {
     persistMaterialsLocally(materials);
   }, [materials]);
@@ -178,6 +257,7 @@ export default function App() {
     try {
       setSheetStatus('syncing');
       const saved = await upsertMaterialInLedger(webAppUrl, itemWithTimestamp);
+      noteMaterialSaved(saved.id, saved.updatedAt);
       setMaterials((prev) => {
         const next = prev.map((m) => (m.id === saved.id ? saved : m));
         if (!next.some((m) => m.id === saved.id)) {
@@ -214,7 +294,12 @@ export default function App() {
 
     try {
       setSheetStatus('syncing');
-      const saved = await upsertMaterialInLedger(webAppUrl, itemWithTimestamp);
+      const saved = await upsertMaterialInLedger(
+        webAppUrl,
+        itemWithTimestamp,
+        materialBase(updatedItem.id),
+      );
+      noteMaterialSaved(saved.id, saved.updatedAt);
       setMaterials((prev) => {
         const next = prev.map((m) => (m.id === saved.id ? saved : m));
         persistMaterialsLocally(next);
@@ -249,9 +334,19 @@ export default function App() {
 
     try {
       setSheetStatus('syncing');
-      for (const target of targets) {
-        await deleteMaterialInLedger(webAppUrl, target.id, target.recordUuid);
+      try {
+        await deleteMaterialsInLedger(
+          webAppUrl,
+          targets.map((target) => ({ id: target.id, recordUuid: target.recordUuid })),
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : '';
+        if (!message.includes('Unknown action') && !message.includes('다른 응답')) throw err;
+        for (const target of targets) {
+          await deleteMaterialInLedger(webAppUrl, target.id, target.recordUuid);
+        }
       }
+      rememberMaterials(materialsRef.current);
       setSheetStatus('connected');
       setSheetMessage(`자재 ${label} 원장 삭제 완료`);
       showToast(`자재 ${label}을 시트에서 삭제했습니다.`, 'success');
@@ -264,56 +359,64 @@ export default function App() {
     }
   };
 
-  const handleReseedDb = async () => {
-    setIsSaving(true);
-    try {
-      setSheetStatus('syncing');
-      const suppliersToSave = loadSuppliersForLedgerSave();
-      showToast(
-        `자재 ${materials.length}종·협력사 ${suppliersToSave.length}곳 저장 중입니다.`,
-        'info',
-        true,
-      );
-      setSheetMessage(
-        `원장에 자재 ${materials.length}종·협력사 ${suppliersToSave.length}곳 저장 중...`,
-      );
-      let savedCount = materials.length;
-      let supplierCount = suppliersToSave.length;
+  const handleReseedDb = () => {
+    const suppliersToSave = loadSuppliersForLedgerSave();
+    const materialCount = materialsRef.current.length;
+    const supplierCount = suppliersToSave.length;
+    setSheetStatus('connected');
+    setSheetMessage(`원장 저장 완료 — 자재 ${materialCount}종, 협력사 ${supplierCount}곳`);
+    showToast(
+      `자재 ${materialCount}종·협력사 ${supplierCount}곳을 시트에 반영했습니다.`,
+      'success',
+    );
+    void enqueueLedgerWrite(async () => {
+      const stampedAt = new Date().toISOString();
+      const latestMaterials = materialsRef.current.map((item) => ({
+        ...item,
+        updatedAt: item.updatedAt || stampedAt,
+      }));
+      const latestSuppliers = loadSuppliersForLedgerSave().map((item) => ({
+        ...item,
+        updatedAt: item.updatedAt || stampedAt,
+      }));
+      const materialBases = getMaterialBases();
+      const supplierBases = getSupplierBases();
+      const materialBaseVersions = Object.keys(materialBases).length > 0 ? materialBases : undefined;
+      const supplierBaseVersions = Object.keys(supplierBases).length > 0 ? supplierBases : undefined;
       try {
-        const saved = await saveLedgerSnapshot(webAppUrl, materials, suppliersToSave);
-        savedCount = saved.materialCount;
-        supplierCount = saved.supplierCount;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : '';
-        if (!message.includes('Unknown action')) throw err;
-        const [materialSaved, supplierSaved] = await Promise.all([
-          replaceAllMaterialsInLedger(webAppUrl, materials),
-          replaceAllSuppliersInLedger(webAppUrl, suppliersToSave),
-        ]);
-        savedCount = materialSaved;
-        supplierCount = supplierSaved;
+        try {
+          await saveLedgerSnapshot(
+            webAppUrl,
+            latestMaterials,
+            latestSuppliers,
+            materialBaseVersions,
+            supplierBaseVersions,
+          );
+        } catch (err) {
+          const message = err instanceof Error ? err.message : '';
+          if (!message.includes('Unknown action') && !message.includes('다른 응답')) throw err;
+          await Promise.all([
+            replaceAllMaterialsInLedger(webAppUrl, latestMaterials, materialBaseVersions),
+            replaceAllSuppliersInLedger(webAppUrl, latestSuppliers, supplierBaseVersions),
+          ]);
+        }
+        rememberMaterials(latestMaterials);
+        rememberSuppliers(latestSuppliers);
+        refreshBomInBackground();
+      } catch (err: unknown) {
+        console.error('원장 일괄 저장 실패:', err);
+        setSheetStatus('error');
+        const message = err instanceof Error ? err.message : '저장 실패';
+        showToast(`원장 저장 실패: ${message}`, 'error');
+        await loadMaterialsFromLedger(false);
+        await reloadSuppliersFromLedger();
       }
-
-      setSheetStatus('connected');
-      setSheetMessage(
-        `원장 저장 완료 — 자재 ${savedCount}종, 협력사 ${supplierCount}곳`,
-      );
-      showToast(
-        `자재 ${savedCount}종·협력사 ${supplierCount}곳을 시트에 반영했습니다.`,
-        'success',
-      );
-    } catch (err: unknown) {
-      console.error('원장 일괄 저장 실패:', err);
-      setSheetStatus('error');
-      const message = err instanceof Error ? err.message : '저장 실패';
-      showToast(`원장 저장 실패: ${message}`, 'error');
-    } finally {
-      setIsSaving(false);
-    }
+    });
   };
 
   const handleSyncFromGoogleSheet = async () => {
     await loadMaterialsFromLedger(true);
+    await reloadSuppliersFromLedger();
   };
 
   const handleApplyProductionConsumption = async (model: ProductionModel, productionUnits: number) => {
@@ -330,32 +433,29 @@ export default function App() {
     setMaterials(next);
     persistMaterialsLocally(next);
 
-    try {
-      setSheetStatus('syncing');
-      showToast(
-        `${modelLabel} ${Math.floor(productionUnits)}대 생산 반영 중입니다.`,
-        'info',
-        true,
-      );
-      setSheetMessage(`${modelLabel} 생산 ${Math.floor(productionUnits)}대 반영 중...`);
-      await replaceAllMaterialsInLedger(webAppUrl, next);
-      setSheetStatus('connected');
-      setSheetMessage(`${modelLabel} 생산 반영 완료 (${lines.length}종 차감)`);
-      const warn =
-        negativeCount > 0
-          ? ` 마이너스 재고 ${negativeCount}종 포함.`
-          : '';
-      showToast(
-        `${modelLabel} ${Math.floor(productionUnits)}대 생산을 시트에 반영했습니다 (${lines.length}종 차감).${warn}`,
-        negativeCount > 0 ? 'info' : 'success',
-      );
-    } catch (err: unknown) {
-      console.error('생산 반영 원장 저장 오류:', err);
-      setSheetStatus('error');
-      const message = err instanceof Error ? err.message : '저장 실패';
-      showToast(`생산 반영 후 원장 저장 실패: ${message}`, 'error');
-      await loadMaterialsFromLedger(false);
-    }
+    setSheetStatus('connected');
+    setSheetMessage(`${modelLabel} 생산 반영 완료 (${lines.length}종 차감)`);
+    const warn = negativeCount > 0 ? ` 마이너스 재고 ${negativeCount}종 포함.` : '';
+    showToast(
+      `${modelLabel} ${Math.floor(productionUnits)}대 생산을 시트에 반영했습니다 (${lines.length}종 차감).${warn}`,
+      negativeCount > 0 ? 'info' : 'success',
+    );
+
+    const loadedBases = getMaterialBases();
+    const bases = Object.keys(loadedBases).length > 0 ? loadedBases : undefined;
+    void enqueueLedgerWrite(async () => {
+      try {
+        await replaceAllMaterialsInLedger(webAppUrl, next, bases);
+        rememberMaterials(next);
+        refreshBomInBackground();
+      } catch (err: unknown) {
+        console.error('생산 반영 원장 저장 오류:', err);
+        setSheetStatus('error');
+        const message = err instanceof Error ? err.message : '저장 실패';
+        showToast(`생산 반영 후 원장 저장 실패: ${message}`, 'error');
+        await loadMaterialsFromLedger(false);
+      }
+    });
   };
 
   return (

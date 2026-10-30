@@ -56,6 +56,7 @@ export interface SupplierInfo {
   category: string;
   reliability: 'A' | 'B' | 'C';
   leadTimeAvgDays: number;
+  updatedAt?: string;
 }
 
 export interface PurchaseOrderItem {
